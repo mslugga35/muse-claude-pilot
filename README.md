@@ -11,4 +11,6 @@ npm test
 CI (`.github/workflows/test.yml`) runs `npm test` on every PR and on pushes to `main`.
 
 ## Helpers
-- `capitalize(text)` in `src/capitalize.js`: uppercases the first character.
+- `src/truncate.js`: `truncateWords(text, maxWords)` truncates text to a word limit, appending "…".
+- `src/wordcount.js`: `wordCount(text)` counts whitespace-separated words.
+- `src/capitalize.js`: `capitalize(text)` uppercases the first character.
