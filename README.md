@@ -9,3 +9,5 @@ npm test
 ```
 
 CI (`.github/workflows/test.yml`) runs `npm test` on every PR and on pushes to `main`.
+
+Helpers: `src/wordcount.js` exports `wordCount(text)`, counting whitespace-separated words.
