@@ -10,5 +10,7 @@ npm test
 
 CI (`.github/workflows/test.yml`) runs `npm test` on every PR and on pushes to `main`.
 
+## Helpers
 - `src/truncate.js`: `truncateWords(text, maxWords)` truncates text to a word limit, appending "…".
-Helpers: `src/wordcount.js` exports `wordCount(text)`, counting whitespace-separated words.
+- `src/wordcount.js`: `wordCount(text)` counts whitespace-separated words.
+- `src/capitalize.js`: `capitalize(text)` uppercases the first character.
