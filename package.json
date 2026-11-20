@@ -1,0 +1,12 @@
+{
+  "name": "muse-claude-pilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Disposable Muse + Claude Code pilot",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}
