@@ -7,7 +7,7 @@ test('AT1 capitalizes each word', () => {
 });
 
 test('AT2 normalizes word casing', () => {
-  assert.equal(titleCase('hello there world'), 'Hello There World');
+  assert.equal(titleCase('hELLO wORLD'), 'Hello World');
 });
 
 test('AT3 trims and collapses whitespace', () => {

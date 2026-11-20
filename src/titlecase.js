@@ -1,5 +1,5 @@
 /**
- * Title-case a string: each whitespace-separated word gets an uppercase first letter.
+ * Title-case a string: first letter of each whitespace-separated word uppercased, the rest lowercased.
  * @param {string} text
  * @returns {string}
  */
@@ -10,6 +10,6 @@ export function titleCase(text) {
   return text
     .split(/\s+/)
     .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
     .join(' ');
 }
