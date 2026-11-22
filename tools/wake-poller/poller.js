@@ -170,6 +170,24 @@ export async function fireRoutine({ cfg, token, text, fetchImpl = fetch }) {
   }
 }
 
+/** Setup check: can the stored key read the board? Ignores the time window; never fires, never touches state. */
+export async function checkCrosswalk({ home = defaultHome(), env = process.env, fetchImpl = fetch } = {}) {
+  fs.mkdirSync(home, { recursive: true });
+  const log = makeLogger(home);
+  const cfg = loadConfig(home);
+  if (!env.CROSSWALK_POLLER_KEY) { log('CHECK', { outcome: 'CHECK_NO_KEY' }); return { outcome: 'CHECK_NO_KEY' }; }
+  const cw = new Crosswalk({ url: cfg.crosswalkUrl, key: env.CROSSWALK_POLLER_KEY, agent: cfg.pollerAgent, fetchImpl });
+  try {
+    await cw.connect();
+    const rows = await cw.boardRows(cfg.crosswalk, cfg.lookbackDays);
+    log('CHECK', { outcome: 'CHECK_OK', rows: rows.length });
+    return { outcome: 'CHECK_OK', rows: rows.length };
+  } catch (e) {
+    log('CHECK', { outcome: 'CHECK_FAILED', error: e.message });
+    return { outcome: 'CHECK_FAILED' };
+  }
+}
+
 // ---------- one poll ----------
 export async function runOnce({ home = defaultHome(), now = new Date(), env = process.env, fetchImpl = fetch, dryRun = false } = {}) {
   fs.mkdirSync(home, { recursive: true });
@@ -265,6 +283,8 @@ export async function runOnce({ home = defaultHome(), now = new Date(), env = pr
 
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const dryRun = process.argv.includes('--dry-run');
-  runOnce({ dryRun }).then((r) => { process.stdout.write(`${r.outcome}\n`); process.exitCode = r.outcome === 'CONFIG_ERROR' ? 2 : 0; })
+  if (process.argv.includes('--check')) {
+    checkCrosswalk().then((r) => { process.stdout.write(`${r.outcome}${r.rows !== undefined ? ` rows=${r.rows}` : ''}\n`); process.exitCode = r.outcome === 'CHECK_OK' ? 0 : 1; });
+  } else runOnce({ dryRun }).then((r) => { process.stdout.write(`${r.outcome}\n`); process.exitCode = r.outcome === 'CONFIG_ERROR' ? 2 : 0; })
     .catch((e) => { try { makeLogger(defaultHome())('POLL_CRASHED', { error: e.message }); } catch { /* ignore */ } process.stdout.write('CRASHED\n'); process.exitCode = 1; });
 }

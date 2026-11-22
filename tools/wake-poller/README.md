@@ -49,35 +49,42 @@ It does no alerting either: Muse's own checks flag missing ACKs.
 No credential is in the repo, in a command line, in the log, or in a config file. `run-poller.ps1` decrypts both
 credentials into environment variables of its own process only, for the length of one poll.
 
-## Install
+## Install: one step
 
-All in PowerShell, from this folder.
+In your own PowerShell window on PC2:
 
-1. **Routine token.**
-   1. Go to claude.ai/code/routines → *muse-claude-pilot engineer (Crosswalk wake)* → Edit → Trigger **+** → **API**.
-   2. Click **Generate token**. It is shown once; don't paste it anywhere else.
-2. **Crosswalk key.** Create a key named `Wake Poller (PC2 script)`:
-   - scope **read** only;
-   - rooms **museclaudepilot** only.
-3. Store both credentials, with hidden input:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\set-credentials.ps1
-   ```
-4. Do a dry run. It reads the board and logs what it would wake, without firing:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\run-poller.ps1 -DryRun
-   ```
-5. Install the task:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install-task.ps1
-   ```
-   The task is `MusePilot-WakePoller`:
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Users\mslug\muse-claude-pilot\tools\wake-poller\setup.ps1
+```
+
+1. It opens the two pages where you create the credentials:
+   - **Routine token**: routine *muse-claude-pilot engineer (Crosswalk wake)* → Edit → Trigger **+** → **API** →
+     **Generate token**. It is shown once.
+   - **Crosswalk key**: name `Wake Poller (PC2 script)`, scope **read only**, rooms **museclaudepilot only**.
+2. It asks for each credential with hidden input and stores both DPAPI-encrypted for your Windows user
+   (`set-credentials.ps1`).
+3. It checks the key can read the board (`run-poller.ps1 -Check`), then does a dry run that fires nothing and changes
+   nothing (`-DryRun`).
+4. It installs the task (`install-task.ps1`). The task is `MusePilot-WakePoller`:
    - It runs every 5 minutes, plus once at sign-in after a restart.
    - It skips a run if the previous one is still going, and stops any run after 9 minutes.
    - It needs no admin rights.
    - It runs only while you're signed in. DPAPI user secrets can't be decrypted by a stored-password-free background
      logon, and storing your Windows password in the task would be a bigger exposure.
    - It expires on its own at 2026-11-28 00:00 ET.
+
+`install-task.ps1 -Validate` registers a disabled copy under another name, prints what Windows stored, and deletes it.
+It was verified on PC2 on 2026-11-22: interval PT5M, no repeat limit, EndBoundary 2026-11-28T00:00-05:00, Interactive
+logon, Limited run level, IgnoreNew, PT9M time limit.
+
+## Pre-install evidence (2026-11-22, no credentials)
+
+| Test | Result |
+|---|---|
+| `npm test` (CI and local) | 67/67 |
+| `install-task.ps1 -Validate` on PC2 | Disabled copy registered, read back as above, removed |
+| Real endpoint, invalid key (`--check`) | `CHECK_FAILED`, fixed error text in the log, nothing fired |
+| Routine honors the wake reference | Manual fire naming done post `zum62g` / `T-20261120-05/rev0`: engineer opened only that post, `DUPLICATE_SKIP`, no posts, 8 s (session `cse_01XrRUkDZFHwGhn7Qwcumb4f`) |
 
 ## Check, disable, remove
 

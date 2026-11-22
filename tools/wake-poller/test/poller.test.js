@@ -236,3 +236,13 @@ test('lock: release never removes a lock that was taken over by another poll', (
   releaseNew();
   assert.ok(acquireLock(h, T('2026-11-22T15:22:00Z')));
 });
+
+test('setup check: reads the board with the key, ignores the window, writes no state, never fires', async () => {
+  const { checkCrosswalk } = await import('../poller.js');
+  const h = home(); const w = fakeWorld();
+  w.post('p1', 'TASK T-20261122-01 rev0 for CC Engineer', 'Sun, Nov 22, 2:00am EST');
+  assert.deepEqual(await checkCrosswalk({ home: h, env, fetchImpl: w.fetch }), { outcome: 'CHECK_OK', rows: 1 });
+  assert.equal((await checkCrosswalk({ home: h, env: { CROSSWALK_POLLER_KEY: 'wrong' }, fetchImpl: w.fetch })).outcome, 'CHECK_FAILED');
+  assert.equal(w.fires.length, 0);
+  assert.equal(fs.existsSync(path.join(h, 'state.json')), false);
+});
