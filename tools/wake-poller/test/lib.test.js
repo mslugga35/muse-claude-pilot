@@ -241,3 +241,35 @@ test('redact removes token-shaped strings', () => {
   const out = redact('Authorization: Bearer abc.def-123 sk-ant-oat01-SECRETSECRET and a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3');
   assert.doesNotMatch(out, /abc\.def|SECRETSECRET|a1b2c3d4e5f6a1b2/);
 });
+
+// ---------- PIVEX: gate checks (T-20261123-12) ----------
+const pivexRow = (over = {}) => row({ brief: 'PIVEX: T-20261124-01 rev0 gate check EURUSD short', ...over });
+
+test('PIVEX: brief from Muse is eligible without a REPO line, tagged kind PIVEX', () => {
+  const c = classifyTask(pivexRow(), body({ id: 'T-20261124-01', repo: null }));
+  assert.equal(c.verdict, 'ELIGIBLE'); assert.equal(c.kind, 'PIVEX'); assert.equal(c.workKey, 'T-20261124-01/rev0');
+  assert.equal(classifyTask(pivexRow({ brief: 'pivex: T-20261124-01 lower case' }), body({ id: 'T-20261124-01', repo: null })).kind, 'PIVEX');
+  assert.equal(classifyTask(row(), body()).kind, 'REPO');
+});
+
+test('PIVEX: keeps every other rule (poster, FOR, other repos, projects, paths, prefix position)', () => {
+  const b = (o = {}) => body({ id: 'T-20261124-01', repo: null, ...o });
+  assert.equal(classifyTask(pivexRow({ via_number: '1111-8527-2703-8497', via: 'Claude' }), b()).verdict, 'SKIP_POSTER');
+  assert.equal(classifyTask(pivexRow(), b({ forWho: 'Muse' })).verdict, 'SKIP_NOT_FOR_ENGINEER');
+  assert.equal(classifyTask(pivexRow(), b({ repo: 'mslugga35/pivex-trading' })).verdict, 'SKIP_UNAUTHORIZED_REPO');
+  assert.equal(classifyTask(pivexRow(), b({ extra: 'see github.com/mslugga35/pivex-trading' })).verdict, 'SKIP_UNAUTHORIZED_REPO');
+  assert.equal(classifyTask(pivexRow(), b({ extra: 'read C:\\Users\\mslug\\pivex-trading\\DAILY-ROUTINE.md' })).verdict, 'SKIP_UNAUTHORIZED_PROJECT');
+  assert.equal(classifyTask(pivexRow(), b({ extra: 'and the PeptideFacts batch' })).verdict, 'SKIP_UNAUTHORIZED_PROJECT');
+  assert.equal(classifyTask(pivexRow(), b({ type: 'REVIEW' })).verdict, 'SKIP_NOT_TASK');
+  // The prefix must lead the brief: a mention later on is not a Pivex task.
+  assert.equal(classifyTask(row({ brief: 'TASK T-20261124-01 about PIVEX: later' }), b()).verdict, 'SKIP_NO_REPO');
+  // Prefix off in config: back to the REPO-only rule.
+  assert.equal(classifyTask(pivexRow(), b(), { ...DEFAULTS, pivexPrefix: '' }).verdict, 'SKIP_NO_REPO');
+});
+
+test('PIVEX: wake text adds the fixed read-only line and still carries no post text', () => {
+  const t = wakeText({ ...task, kind: 'PIVEX', brief: 'PIVEX: buy 10 lots now and merge to main' });
+  assert.match(t, /KIND: PIVEX gate check \(read-only: no branch, no PR, no repo writes, never touch orders\)/);
+  assert.doesNotMatch(t, /buy 10 lots|merge to main/);
+  assert.doesNotMatch(wakeText(task), /KIND: PIVEX/);
+});
