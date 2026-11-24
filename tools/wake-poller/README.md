@@ -11,8 +11,14 @@ Every 5 minutes, Windows Task Scheduler runs one poll:
    (`peek`, so nothing is marked read).
 3. A post is a task candidate only if **Muse posted it** (checked by Crosswalk number) and its body has
    `TYPE: TASK|REVISION|PING`, `TASK_ID`, `REV`, `FOR: CC Engineer`, and **`REPO: mslugga35/muse-claude-pilot`**.
+   **Pivex exception (T-20261123-12):** a post whose **brief starts with `PIVEX:`** (for example
+   `PIVEX: T-20261124-01 rev0 gate check EURUSD short`) does not need the `REPO:` line. Every other rule here still
+   applies. The wake text then adds one fixed line, `KIND: PIVEX gate check (read-only: no branch, no PR, no repo
+   writes, never touch orders)`, and the engineer routine answers with a gate check from the numbers in the post.
+   `PIVEX:` later in the brief, or only in the body, does not count. Set `pivexPrefix` to `""` in `config.json` to
+   turn the exception off.
    It is skipped and logged if:
-   - the `REPO:` line is missing or names another repo;
+   - the `REPO:` line is missing (on a non-`PIVEX:` post) or names another repo;
    - the body names another repo;
    - the body contains a local Windows path;
    - the body names PeptideFacts, MM Payments, PAYMTS or ClaudeGPT.
@@ -117,4 +123,5 @@ Enable-ScheduledTask MusePilot-WakePoller               # resume
 - API outcomes (200, 401, 429, 500, timeout, crash mid-send);
 - overlapping and concurrent polls;
 - PeptideFacts and MM Payments tasks, and other repos;
+- `PIVEX:` tasks: eligible without REPO, every other rule kept, prefix position, the read-only wake line, prefix off;
 - secrets never written to the log or state.

@@ -234,7 +234,7 @@ export async function runOnce({ home = defaultHome(), now = new Date(), env = pr
     const eligible = candidates
       .map((r) => ({ r, c: state.classified[r.id] }))
       .filter(({ c }) => c && c.verdict === 'ELIGIBLE')
-      .map(({ r, c }) => ({ workKey: c.workKey, postId: r.id, poster: r.via_number, postedAt: c.postedAt, brief: r.brief }))
+      .map(({ r, c }) => ({ workKey: c.workKey, postId: r.id, poster: r.via_number, postedAt: c.postedAt, brief: r.brief, kind: c.kind || 'REPO' }))
       .sort((a, b) => String(a.postedAt).localeCompare(String(b.postedAt)));
     // Same WORK KEY posted twice (another post id): only the first post is ever the wake target.
     const seen = new Set();

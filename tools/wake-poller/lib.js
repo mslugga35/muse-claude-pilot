@@ -16,6 +16,9 @@ export const DEFAULTS = Object.freeze({
   // Any of these in a task body means another project: never wake for it.
   forbiddenMarkers: ['peptidefacts', 'pf-release', 'mm-payments', 'mm payments', 'mmpayments', 'paymts',
     'getpaymts', 'getmmpayments', 'paymtswebsite', 'claudegpt'],
+  // A Muse task post whose brief starts with this prefix is a Pivex gate check: eligible without the REPO line
+  // (T-20261123-12). Every other rule (poster, template, FOR, forbidden projects, other repos, paths) still applies.
+  pivexPrefix: 'PIVEX:',
   timeZone: 'America/New_York',
   windowStart: '08:05', // inclusive, Eastern wall clock
   windowEnd: '22:05', // inclusive
@@ -154,8 +157,9 @@ export function classifyTask(row, block, cfg = DEFAULTS) {
   if (!Number.isInteger(rev) || rev < 0) return { verdict: 'SKIP_NOT_TASK', reason: 'REV malformed' };
   const workKey = `${taskId}/rev${rev}`;
   if (!cfg.engineerAliases.includes(forWho)) return { verdict: 'SKIP_NOT_FOR_ENGINEER', reason: `FOR ${forWho || 'missing'}`, workKey };
-  if (!repo) return { verdict: 'SKIP_NO_REPO', reason: 'no REPO line naming the authorized repo', workKey };
-  if (repo.toLowerCase() !== cfg.repo.toLowerCase()) return { verdict: 'SKIP_UNAUTHORIZED_REPO', reason: `REPO ${repo}`, workKey };
+  const kind = cfg.pivexPrefix && String(row.brief || '').trim().toUpperCase().startsWith(cfg.pivexPrefix.toUpperCase()) ? 'PIVEX' : 'REPO';
+  if (!repo && kind !== 'PIVEX') return { verdict: 'SKIP_NO_REPO', reason: 'no REPO line naming the authorized repo', workKey };
+  if (repo && repo.toLowerCase() !== cfg.repo.toLowerCase()) return { verdict: 'SKIP_UNAUTHORIZED_REPO', reason: `REPO ${repo}`, workKey };
   const lower = block.toLowerCase();
   const marker = cfg.forbiddenMarkers.find((w) => lower.includes(w));
   if (marker) return { verdict: 'SKIP_UNAUTHORIZED_PROJECT', reason: `mentions ${marker}`, workKey };
@@ -163,7 +167,7 @@ export function classifyTask(row, block, cfg = DEFAULTS) {
   const otherRepo = [...block.matchAll(/(?:github\.com\/)?\b(mslugga35|mslugga|mpmmo)\/([\w.-]+)/gi)]
     .map((x) => `${x[1]}/${x[2].replace(/[.-]+$/, '')}`.toLowerCase()).find((r) => r !== cfg.repo.toLowerCase());
   if (otherRepo) return { verdict: 'SKIP_UNAUTHORIZED_REPO', reason: `mentions ${otherRepo}`, workKey };
-  return { verdict: 'ELIGIBLE', workKey, taskId, rev, type };
+  return { verdict: 'ELIGIBLE', workKey, taskId, rev, type, kind };
 }
 
 // ---------- decisions ----------
@@ -237,6 +241,7 @@ export function wakeText(task, cfg = DEFAULTS) {
     `crosswalk: ${cfg.crosswalk}`,
     `post id: ${task.postId}`,
     `WORK KEY: ${task.workKey}`,
+    ...(task.kind === 'PIVEX' ? ['KIND: PIVEX gate check (read-only: no branch, no PR, no repo writes, never touch orders).'] : []),
     `Open post ${task.postId} and handle only WORK KEY ${task.workKey} under your normal triage (check for an existing [CC] ACK first).`,
     'Do not select a different task in this run. If it is already ACKed, end with DUPLICATE_SKIP.',
   ].join('\n');
