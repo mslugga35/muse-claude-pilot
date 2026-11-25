@@ -1,6 +1,6 @@
 // PC2 worker: pure decision logic (no I/O), so every rule is unit-tested.
 // The worker starts ONE headless Claude Code run for ONE open board task assigned to the harness, under hard caps.
-import { inWakeWindow, wallClock, parseWhen } from '../wake-poller/lib.js';
+import { inWakeWindow, wallClock, parseWhen, DEFAULTS as POLLER } from '../wake-poller/lib.js';
 
 export const WORKER_DEFAULTS = Object.freeze({
   timeZone: 'America/New_York',
@@ -40,8 +40,14 @@ export function taskKeys(task) {
   return [...keys];
 }
 
-const isHarness = (r) => /^\[HARNESS\]/.test(String(r.brief || '')) || /pilot harness/i.test(String(r.via || ''));
-const isCcAck = (r) => /^\[CC\] ACK\b/.test(String(r.brief || ''));
+// Identity by Crosswalk number, never by display name or brief text (security review 2026-11-25).
+export const HARNESS_NUMBERS = ['1111-8527-2703-8497'];
+const fromOwnerAccount = (r) => String(r.author || '').toLowerCase() === 'you';
+const isHarness = (r) => HARNESS_NUMBERS.includes(String(r.via_number || ''));
+const isCcAck = (r) => (POLLER.engineerNumbers || []).includes(String(r.via_number || '')) && /^\[CC\] ACK\b/.test(String(r.brief || ''));
+// Keys are task ids (\w+) or TASK_IDs (T-\d{8}-\d{2}), so they hold no regex specials; still reject anything else.
+const safeKey = (k) => (/^[\w-]+$/.test(k) ? k : null);
+const mentions = (r, keys) => keys.some((k) => safeKey(k) && new RegExp(`(^|[^\\w-])${k}($|[^\\w-])`).test(String(r.brief || '')));
 
 /**
  * Free board check BEFORE any LLM run (rows = museclaudepilot posts, newest first, as the board returns them).
@@ -53,7 +59,8 @@ const isCcAck = (r) => /^\[CC\] ACK\b/.test(String(r.brief || ''));
  */
 export function boardSkip(task, rows, now) {
   const keys = taskKeys(task);
-  const related = (rows || []).filter((r) => keys.some((k) => String(r.brief || '').includes(k)));
+  // Only posts from the owner's own account (Muse, the harness, the cloud engineer, the owner) count.
+  const related = (rows || []).filter((r) => fromOwnerAccount(r) && mentions(r, keys));
   if (related.some(isCcAck)) return 'CC_HAS_IT';
   const iHarness = related.findIndex(isHarness);
   if (iHarness === -1) return null;
