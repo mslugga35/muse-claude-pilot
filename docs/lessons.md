@@ -19,4 +19,5 @@ work. Project-specific lessons for other repos live in those repos.
 | L-012 | 2026-11-25 | One task used 4 of 6 daily runs; DEPLOY task starved | Oldest-first ordering + every review post re-qualifies the task | Priority lanes, least-recently-attempted order, max 2 runs per task per day (PR #11, tests) |
 | L-013 | 2026-11-25 | A claim post held 3 tasks instead of 1 | The free board check treats any harness post that mentions a task id as about that task | Claim / IN PROGRESS posts name only the task they hold |
 | L-014 | 2026-11-25 | Preview servers left running after worker runs | Runs start servers and exit without stopping them | Worker stops the run's own descendant processes after each run (`cleanupDescendants`, live-tested) |
-
+| L-015 | 2026-11-25 | A regex `/?
+/` became real CR/LF bytes; JS failed to parse | Shell heredoc + Python string escapes, and Python text-mode reads turn CRLF into LF (a byte-exact fix failed) | Write scripts to a file with the Write tool; byte fixes use `newline=''`; `node --check` before tests |

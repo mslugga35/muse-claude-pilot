@@ -12,13 +12,16 @@ export const WORKER_DEFAULTS = Object.freeze({
   // from it). A task added by any other board member is never worked, whatever it is addressed to.
   trustedBy: ['you'],
   trustedVia: ['muse', 'owner', 'mpmmorales', ''],
-  maxRunsPerDay: 6, // runs started per Eastern calendar day (task runs + the idle check); task-spec value (T-20261125-01)
+  // Work whenever there is work (owner 2026-11-25, T-20261125-05: "dont worry about the limit and work if i hit the
+  // limit i hit the limit"). No fixed daily cap. When the subscription refuses calls, the worker pauses until the reset
+  // time Claude Code reports, then resumes on its own. It never runs while paid extra usage is on (OVERAGE_GUARD).
+  fuseRunsPerDay: 40, // runaway fuse (a loop bug), not a work target: real runs take 15-45 min each
   idleCheckPerDay: true, // with no open harness task: at most ONE short run per day (QUEUE EMPTY + next known item)
-  minGapMinutes: 20, // between run starts
+  minGapMinutes: 10, // between run starts (= the scheduler interval: back-to-back when there is work)
   retryAfterHours: 6, // a task the worker already attempted is not attempted again for this long
   maxAttemptsPerTask: 3, // then it is left for Muse/owner with the evidence already on the board
   runTimeoutMinutes: 45, // the claude process is killed after this (was 60: one run held the only lane for an hour)
-  maxRunsPerTaskPerDay: 2, // one busy task can't take the whole daily budget (vc8a2c took 4 of 6 on 2026-11-25)
+  maxRunsPerTaskPerDay: 2, // fairness: past this, a task yields to any other ready task (it is not a stop: alone, it runs)
   minFreeMemoryMB: 1500, // below this, skip the run (LOW_MEMORY) instead of risking a failed run or slowing other apps
   maxBudgetUsd: 8, // passed to claude --max-budget-usd
 });
@@ -97,11 +100,77 @@ export function usageSummary(state, date, cfg = WORKER_DEFAULTS) {
   const byTask = {};
   for (const r of runs) byTask[r.taskId] = (byTask[r.taskId] || 0) + 1;
   return {
-    date, runs: runs.length, dailyCap: cfg.maxRunsPerDay, minutes: Math.round(sum('seconds') / 60),
+    date, runs: runs.length, fuse: cfg.fuseRunsPerDay, minutes: Math.round(sum('seconds') / 60),
     listPriceUsd: Math.round(sum('costUsd') * 100) / 100, turns: sum('turns'), permissionDenials: sum('denials'),
     byTask, outcomes: runs.reduce((a, r) => { a[r.outcome || 'RUNNING'] = (a[r.outcome || 'RUNNING'] || 0) + 1; return a; }, {}),
     note: 'list-price equivalent as reported by Claude Code; billed against the owner subscription, not dollars',
+    inactivity: inactivitySummary(state, date, cfg), latestUsageReading: state.limits || null,
   };
+}
+
+// ---- Subscription usage (T-20261125-05) ----
+/**
+ * Parse Claude Code stream-json output (one JSON object per line) into the latest usage reading, or null.
+ * Uses only the rate_limit_event lines: { status, resetsAt (unix s), rateLimitType, utilization (0..1),
+ * unifiedWindows: { seven_day|five_hour: { utilization, resetsAt, status } }, overageEnabled, isUsingOverage }.
+ */
+export function readingFromStream(text, observedAt = new Date()) {
+  let ev = null;
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!line.includes('"rate_limit_event"')) continue;
+    try { const o = JSON.parse(line); if (o.type === 'rate_limit_event' && o.rate_limit_info) ev = o.rate_limit_info; } catch { /* partial line */ }
+  }
+  if (!ev) return null;
+  const windows = {};
+  const put = (name, w) => {
+    if (!w || !Number.isFinite(Number(w.utilization))) return;
+    windows[name] = { utilization: Number(w.utilization), resetsAt: Number(w.resetsAt) * 1000 || null, status: String(w.status || '') };
+  };
+  for (const [name, w] of Object.entries(ev.unifiedWindows || {})) put(name, w);
+  if (ev.rateLimitType && !windows[ev.rateLimitType]) put(ev.rateLimitType, ev);
+  return {
+    observedAt: new Date(observedAt).toISOString(), status: String(ev.status || ''), resetsAt: Number(ev.resetsAt) * 1000 || null,
+    windows, overageEnabled: ev.overageEnabled === true, isUsingOverage: ev.isUsingOverage === true,
+  };
+}
+
+/**
+ * Gate from the latest usage reading (taken from the previous run's own output; no extra calls). Returns null (go)
+ * or a skip { reason, until? }:
+ *  OVERAGE_GUARD: paid extra usage is on or in use. Owner rule: never spend it without approval, so no runs.
+ *  LIMIT_PAUSE: the subscription refused calls; resume automatically after the reported reset time.
+ */
+export function usageGate(reading, now) {
+  if (!reading) return null;
+  if (reading.overageEnabled || reading.isUsingOverage) return { reason: 'OVERAGE_GUARD' };
+  const refusals = [{ status: reading.status, resetsAt: reading.resetsAt }, ...Object.values(reading.windows || {})];
+  for (const w of refusals) {
+    if (/rejected/.test(String(w.status || '')) && w.resetsAt && now < w.resetsAt) return { reason: 'LIMIT_PAUSE', until: new Date(w.resetsAt).toISOString() };
+  }
+  return null;
+}
+
+// ---- Inactivity accounting (for the daily report) ----
+/** Extend the open inactivity period if the reason is unchanged (checks are ~10 min apart), else start a new one. */
+export function recordSkip(state, reason, now) {
+  const periods = [...(state.periods || [])];
+  const last = periods[periods.length - 1];
+  const iso = now.toISOString();
+  if (last && last.reason === reason && now - Date.parse(last.to) <= 25 * MIN) periods[periods.length - 1] = { ...last, to: iso };
+  else periods.push({ reason, from: iso, to: iso });
+  return { ...state, periods: periods.slice(-400) };
+}
+
+/** Minutes per inactivity reason on an Eastern date, plus the periods of 30 min or more. */
+export function inactivitySummary(state, date, cfg = WORKER_DEFAULTS) {
+  const byReason = {}; const long = [];
+  for (const p of state.periods || []) {
+    if (wallClock(new Date(p.from), cfg.timeZone).date !== date) continue;
+    const mins = Math.max(10, Math.round((Date.parse(p.to) - Date.parse(p.from)) / MIN) + 10); // each check covers ~10 min
+    byReason[p.reason] = (byReason[p.reason] || 0) + mins;
+    if (mins >= 30) long.push({ reason: p.reason, from: p.from, to: p.to, minutes: mins });
+  }
+  return { minutesByReason: byReason, periods: long.slice(-30) };
 }
 
 /** Runs started on the same Eastern date as now. */
@@ -116,6 +185,8 @@ export function runsToday(state, now, cfg = WORKER_DEFAULTS) {
  * running: true when a previous worker run is still alive (lock held).
  */
 export function decideRun({ now, openRows, state, running, paused, boardRows = null, freeMemoryMB = Infinity, cfg = WORKER_DEFAULTS }) {
+  const gate = usageGate(state.limits, now);
+  if (gate) return { action: 'SKIP', ...gate };
   if (paused) return { action: 'SKIP', reason: 'PAUSED' };
   if (!inWakeWindow(now, cfg)) return { action: 'SKIP', reason: 'OUT_OF_WINDOW' };
   if (running) return { action: 'SKIP', reason: 'RUN_IN_PROGRESS' };
@@ -123,7 +194,7 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
   const skipped = boardRows ? all.map((t) => [t.id, boardSkip(t, boardRows, now)]).filter(([, r]) => r) : [];
   const tasks = all.filter((t) => !skipped.some(([id]) => id === t.id));
   if (all.length && !tasks.length) return { action: 'SKIP', reason: 'ALL_WAITING_ON_OTHERS', waiting: Object.fromEntries(skipped) };
-  if (runsToday(state, now, cfg) >= cfg.maxRunsPerDay) return { action: 'SKIP', reason: tasks.length ? 'DAILY_CAP' : 'NO_HARNESS_TASKS' };
+  if (runsToday(state, now, cfg) >= cfg.fuseRunsPerDay) return { action: 'SKIP', reason: tasks.length ? 'FUSE' : 'NO_HARNESS_TASKS' };
   const last = (state.runs || []).reduce((m, r) => Math.max(m, Date.parse(r.startedAt) || 0), 0);
   if (last && now - last < cfg.minGapMinutes * MIN) return { action: 'SKIP', reason: tasks.length ? 'MIN_GAP' : 'NO_HARNESS_TASKS' };
   if (tasks.length === 0) {
@@ -143,9 +214,10 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
   // Priority lanes: DEPLOY tasks first (finishing approved work), then operation infrastructure (this repo), then the
   // rest; inside a lane, never-attempted first, then least recently attempted.
   const lane = (t) => (/\bDEPLOY\b/.test(String(t.title || '')) ? 0 : /REPO:\s*mslugga35\/muse-claude-pilot/.test(String(t.details || '')) ? 1 : 2);
-  const ordered = [...tasks].filter((t) => runsTodayFor(t.id) < cfg.maxRunsPerTaskPerDay)
-    .sort((x, y) => lane(x) - lane(y) || lastAt(x) - lastAt(y));
-  if (!ordered.length) return { action: 'SKIP', reason: 'TASK_DAILY_CAP', open: tasks.length };
+  // Fairness, not a stop: a task past maxRunsPerTaskPerDay goes behind every task under it, but still runs if nothing
+  // else is ready.
+  const over = (t) => (runsTodayFor(t.id) >= cfg.maxRunsPerTaskPerDay ? 1 : 0);
+  const ordered = [...tasks].sort((x, y) => over(x) - over(y) || lane(x) - lane(y) || lastAt(x) - lastAt(y));
   const pick = ordered.find((t) => {
     const a = attempts[t.id];
     if (!a) return true;

@@ -1,5 +1,12 @@
 # Changelog
 
+
+## 2026-11-25 — dynamic workload (PR #11)
+- Fixed 6 runs/day removed (owner: "dont worry about the limit and work if i hit the limit i hit the limit").
+- Worker reads the subscription's live usage from each run (stream-json `rate_limit_event`): pauses on refusal until the reset, resumes itself; never runs while paid extra usage is on.
+- A task past 2 runs/day yields to other ready tasks but is never stopped when alone. Runaway fuse 40/day. Gap 10 min.
+- usage-summary.json adds inactivity minutes per reason, long idle periods and the latest usage reading.
+
 ## 2026-11-25 — T-20261125-04: worker scheduling and memory hygiene (PR #11)
 - Priority lanes (DEPLOY → this repo → other projects), fair order, max 2 runs per task per day, 45-min run limit.
 - Skip runs below 1.5 GB free memory; stop the run's own leftover processes after each run.

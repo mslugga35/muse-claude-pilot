@@ -6,7 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 // Tests must not depend on how much memory the machine running them has free (PC2 is often low): pin it.
 os.freemem = () => 8 * 1024 ** 3;
-import { WORKER_DEFAULTS as D, harnessTasks, decideRun, recordStart, runsToday, runPrompt } from '../lib.js';
+import { WORKER_DEFAULTS as D, harnessTasks, decideRun, recordStart, runsToday, runPrompt, readingFromStream, usageGate, recordSkip, inactivitySummary } from '../lib.js';
 import { checkOnce } from '../worker.js';
 
 const T = (s) => new Date(s);
@@ -57,7 +57,7 @@ test('runs the oldest task, then respects the gap, the retry delay and the per-t
   const d1 = decideRun({ now: NOON, openRows: rows, state: s });
   assert.deepEqual([d1.action, d1.taskId], ['RUN', 'a1']);
   s = recordStart(s, 'a1', NOON);
-  assert.equal(decideRun({ now: new Date(+NOON + 10 * 60000), openRows: rows, state: s }).reason, 'MIN_GAP');
+  assert.equal(decideRun({ now: new Date(+NOON + 5 * 60000), openRows: rows, state: s }).reason, 'MIN_GAP');
   const d2 = decideRun({ now: new Date(+NOON + 25 * 60000), openRows: rows, state: s });
   assert.equal(d2.taskId, 'b2'); // a1 attempted < 6 h ago
   s = recordStart(s, 'b2', new Date(+NOON + 25 * 60000));
@@ -68,11 +68,13 @@ test('runs the oldest task, then respects the gap, the retry delay and the per-t
   assert.equal(decideRun({ now: new Date(+NOON + 8 * 3600000), openRows: rows, state: s }).reason, 'ALL_ATTEMPTED_RECENTLY');
 });
 
-test('daily cap counts Eastern-date runs only', () => {
+test('no fixed daily cap: 6+ runs keep going; only the runaway fuse (Eastern date) stops a loop', () => {
   let s = empty();
-  for (let i = 0; i < D.maxRunsPerDay; i += 1) s = recordStart(s, `x${i}`, new Date(+T('2026-11-25T13:10:00Z') + i * 30 * 60000));
-  assert.equal(runsToday(s, NOON), D.maxRunsPerDay);
-  assert.equal(decideRun({ now: T('2026-11-25T23:00:00Z'), openRows: [task('a1')], state: s }).reason, 'DAILY_CAP');
+  for (let i = 0; i < 6; i += 1) s = recordStart(s, `x${i}`, new Date(+T('2026-11-25T13:10:00Z') + i * 30 * 60000));
+  assert.equal(decideRun({ now: T('2026-11-25T23:00:00Z'), openRows: [task('a1')], state: s }).action, 'RUN', 'owner: never stop at six');
+  for (let i = 6; i < D.fuseRunsPerDay; i += 1) s = recordStart(s, `x${i}`, new Date(+T('2026-11-25T13:10:00Z') + i * 60000));
+  assert.equal(runsToday(s, NOON), D.fuseRunsPerDay);
+  assert.equal(decideRun({ now: T('2026-11-25T23:00:00Z'), openRows: [task('a1')], state: s }).reason, 'FUSE');
   assert.equal(runsToday(s, T('2026-11-26T14:00:00Z')), 0);
 });
 
@@ -224,7 +226,7 @@ test('fairness: a never-attempted task goes before an old task that keeps gettin
   assert.equal(decideRun({ now: NOON, openRows: [old, fresh], state: s, boardRows: [review] }).taskId, 'd9');
 });
 
-test('scheduling: DEPLOY lane first, then this repo, then other projects; one task gets at most 2 runs a day', () => {
+test('scheduling: DEPLOY lane first, then this repo, then other projects; a task past 2 runs a day yields but is not stopped', () => {
   const pf = task('pf1', { title: 'PeptideFacts preview', created_at: '2026-11-24T08:00:00Z' });
   const infra = task('in1', { title: 'T-20261125-05 poller tweak', details: 'REPO: mslugga35/muse-claude-pilot', created_at: '2026-11-25T09:00:00Z' });
   const dep = task('dp1', { title: 'T-20261125-03 DEPLOY: merge PR #10', created_at: '2026-11-25T11:29:00Z' });
@@ -233,8 +235,9 @@ test('scheduling: DEPLOY lane first, then this repo, then other projects; one ta
   let s = recordStart(empty(), 'pf1', T('2026-11-25T13:00:00Z'));
   s = recordStart(s, 'pf1', T('2026-11-25T14:00:00Z'));
   const review = post('REVIEW pf1: more', 'Muse', 'Today, Wed, Nov 25, 11:30am EST');
-  assert.equal(decideRun({ now: NOON, openRows: [pf], state: s, boardRows: [review] }).reason, 'TASK_DAILY_CAP');
-  assert.equal(decideRun({ now: T('2026-11-26T14:00:00Z'), openRows: [pf], state: s, boardRows: [review] }).taskId, 'pf1'); // next day
+  const other = task('zz9', { created_at: '2026-11-25T10:00:00Z' });
+  assert.equal(decideRun({ now: NOON, openRows: [pf, other], state: s, boardRows: [review] }).taskId, 'zz9', 'busy task yields');
+  assert.equal(decideRun({ now: NOON, openRows: [pf], state: s, boardRows: [review] }).taskId, 'pf1', 'alone, it keeps working');
 });
 
 test('low memory: the run is skipped (LOW_MEMORY), nothing else is touched', async () => {
@@ -266,4 +269,78 @@ test('daily usage summary: runs, minutes, list-price total, per task, outcomes (
   assert.deepEqual([u.runs, u.minutes, u.listPriceUsd, u.turns, u.permissionDenials], [3, 13, 2.25, 28, 1]);
   assert.deepEqual(u.byTask, { a1: 2, b2: 1 });
   assert.deepEqual(u.outcomes, { EXITED_OK: 2, KILLED_TIMEOUT: 1 });
+});
+
+// ---- Subscription usage (T-20261125-05) ----
+// A real rate_limit_event line as Claude Code 2026-11 prints it in stream-json mode (ids removed).
+const EV = (info) => JSON.stringify({ type: 'rate_limit_event', rate_limit_info: info });
+const OK_EVENT = EV({ status: 'allowed_warning', resetsAt: 1795626000, rateLimitType: 'seven_day', utilization: 0.78, overageStatus: 'rejected',
+  overageDisabledReason: 'org_level_disabled', isUsingOverage: false, surpassedThreshold: 0.75,
+  unifiedWindows: { seven_day: { utilization: 0.78, resetsAt: 1795626000, status: 'allowed_warning', surpassedThreshold: 0.75 } }, overageEnabled: false });
+const REFUSED = EV({ status: 'rejected', resetsAt: 1795640400, rateLimitType: 'five_hour', utilization: 1, isUsingOverage: false, overageEnabled: false,
+  unifiedWindows: { five_hour: { utilization: 1, resetsAt: 1795640400, status: 'rejected' } } }); // resets 21:00Z
+
+test('usage reading: parsed from the stream, newest event wins, junk ignored', () => {
+  const r = readingFromStream(`{"type":"system"}\nnot json\n${OK_EVENT}\n{"type":"result"}`, NOON);
+  assert.equal(r.windows.seven_day.utilization, 0.78);
+  assert.equal(r.windows.seven_day.resetsAt, 1795626000 * 1000);
+  assert.deepEqual([r.overageEnabled, r.isUsingOverage, r.observedAt], [false, false, NOON.toISOString()]);
+  assert.equal(readingFromStream(`${OK_EVENT}\n${REFUSED}`).status, 'rejected');
+  assert.equal(readingFromStream('{"type":"result"}'), null);
+});
+
+test('usage gate: work at any utilization; pause on refusal until the reset, then resume by itself', () => {
+  const ok = readingFromStream(OK_EVENT, NOON);
+  assert.equal(usageGate(ok, NOON), null, '78% weekly: keep working (owner: if I hit the limit I hit it)');
+  assert.equal(usageGate(null, NOON), null, 'no reading yet: work');
+  const refused = readingFromStream(REFUSED, NOON);
+  const g = usageGate(refused, T('2026-11-25T18:00:00Z'));
+  assert.deepEqual([g.reason, g.until], ['LIMIT_PAUSE', '2026-11-25T21:00:00.000Z']);
+  assert.equal(usageGate(refused, T('2026-11-25T21:00:01Z')), null, 'after the reset: resume');
+  const st = { ...empty(), limits: refused };
+  assert.equal(decideRun({ now: T('2026-11-25T18:00:00Z'), openRows: [task('a1')], state: st }).reason, 'LIMIT_PAUSE');
+  assert.equal(decideRun({ now: T('2026-11-25T21:05:00Z'), openRows: [task('a1')], state: st }).action, 'RUN');
+});
+
+test('usage gate: never runs while paid extra usage is on or in use (owner approval required)', () => {
+  const on = readingFromStream(EV({ status: 'allowed', resetsAt: 1795626000, overageEnabled: true, isUsingOverage: false }), NOON);
+  const using = readingFromStream(EV({ status: 'allowed', resetsAt: 1795626000, overageEnabled: false, isUsingOverage: true }), NOON);
+  assert.equal(usageGate(on, NOON).reason, 'OVERAGE_GUARD');
+  assert.equal(usageGate(using, NOON).reason, 'OVERAGE_GUARD');
+  assert.equal(decideRun({ now: NOON, openRows: [task('a1')], state: { ...empty(), limits: on } }).reason, 'OVERAGE_GUARD');
+});
+
+test('inactivity: consecutive same-reason checks merge into one period; daily minutes per reason', () => {
+  let s = empty();
+  for (let i = 0; i < 6; i += 1) s = recordSkip(s, 'ALL_WAITING_ON_OTHERS', new Date(+NOON + i * 10 * 60000));
+  s = recordSkip(s, 'LIMIT_PAUSE', new Date(+NOON + 60 * 60000));
+  s = recordSkip(s, 'ALL_WAITING_ON_OTHERS', new Date(+NOON + 70 * 60000));
+  assert.equal(s.periods.length, 3);
+  const sum = inactivitySummary(s, '2026-11-25');
+  assert.deepEqual(sum.minutesByReason, { ALL_WAITING_ON_OTHERS: 70, LIMIT_PAUSE: 10 });
+  assert.deepEqual(sum.periods.map((p) => [p.reason, p.minutes]), [['ALL_WAITING_ON_OTHERS', 60]]);
+});
+
+test('checkOnce: streams output, stores the live usage reading, next check pauses on a refusal; skips are logged as periods', async () => {
+  const h = home(); fs.writeFileSync(path.join(h, 'worker-prompt.md'), 'x');
+  const calls = [];
+  const impl = (cmd, args, opts) => {
+    calls.push(args);
+    fs.writeSync(opts.stdio[1], `${OK_EVENT}\n${REFUSED}\n{"type":"result","num_turns":4,"total_cost_usd":0.5,"permission_denials":[]}\n`);
+    const c = new EventEmitter(); c.kill = () => {}; setImmediate(() => c.emit('exit', 0, null)); return c;
+  };
+  const now = T('2026-11-25T18:00:00Z');
+  await checkOnce({ home: h, now, env, spawnImpl: impl, readTasks: async () => [task('a1'), task('b2')] });
+  const a = calls[0];
+  assert.equal(a[a.indexOf('--output-format') + 1], 'stream-json'); assert.ok(a.includes('--verbose'));
+  const st = JSON.parse(fs.readFileSync(path.join(h, 'state.json'), 'utf8'));
+  assert.equal(st.limits.status, 'rejected');
+  assert.deepEqual([st.runs[0].turns, st.runs[0].costUsd], [4, 0.5]);
+  const r2 = await checkOnce({ home: h, now: new Date(+now + 15 * 60000), env, spawnImpl: impl, readTasks: async () => [task('b2')] });
+  assert.deepEqual([r2.outcome, r2.until], ['LIMIT_PAUSE', '2026-11-25T21:00:00.000Z']);
+  assert.equal(calls.length, 1, 'no run while refused');
+  const st2 = JSON.parse(fs.readFileSync(path.join(h, 'state.json'), 'utf8'));
+  assert.equal(st2.periods.at(-1).reason, 'LIMIT_PAUSE');
+  const u = JSON.parse(fs.readFileSync(path.join(h, 'usage-summary.json'), 'utf8'));
+  assert.ok(u.today.latestUsageReading && u.today.inactivity);
 });

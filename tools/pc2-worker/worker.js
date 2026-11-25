@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Crosswalk, acquireLock } from '../wake-poller/poller.js';
 import { DEFAULTS as POLLER } from '../wake-poller/lib.js';
-import { WORKER_DEFAULTS, decideRun, recordStart, runPrompt, usageSummary } from './lib.js';
+import { WORKER_DEFAULTS, decideRun, recordStart, recordSkip, readingFromStream, runPrompt, usageSummary } from './lib.js';
 import { wallClock } from '../wake-poller/lib.js';
 
 export function workerHome() { return path.join(process.env.LOCALAPPDATA || '.', 'muse-ops-worker'); }
@@ -65,7 +65,11 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
     const state = loadState(home);
     try { writeUsage(home, now, cfg); } catch { /* reporting must never block work */ }
     const d = decideRun({ now, openRows, state, running, paused, boardRows, freeMemoryMB: freeMemImpl() / 1048576, cfg });
-    if (d.action !== 'RUN') { log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting, freeMemoryMB: d.freeMemoryMB }); return { outcome: d.reason }; }
+    if (d.action !== 'RUN') {
+      log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting, freeMemoryMB: d.freeMemoryMB, until: d.until });
+      if (!running) { try { saveState(home, recordSkip(loadState(home), d.reason, now)); } catch { /* reporting only */ } }
+      return { outcome: d.reason, until: d.until };
+    }
     if (dryRun) { log(home, 'CHECK', { outcome: 'DRY_RUN_WOULD_RUN', taskId: d.taskId }); return { outcome: 'DRY_RUN_WOULD_RUN', taskId: d.taskId }; }
     saveState(home, recordStart(state, d.taskId, now)); // recorded BEFORE starting: a crash never causes a rapid re-run
     log(home, 'RUN_START', { taskId: d.taskId, title: d.title });
@@ -76,8 +80,12 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
     const s2 = loadState(home);
     const last = s2.runs[s2.runs.length - 1];
     if (last && last.taskId === d.taskId) Object.assign(last, { endedAt: new Date().toISOString(), outcome: res.outcome, exitCode: res.code, seconds: res.seconds, ...runStats(res.outFile) });
+    // The run's own output carries the subscription's live usage (weekly / 5-hour utilization, reset time, extra-usage
+    // status). Keep the latest: the next check pauses on a refusal until the reset, and never runs with extra usage on.
+    let reading = null; try { reading = readingFromStream(fs.readFileSync(res.outFile, 'utf8')); } catch { /* no output */ }
+    if (reading) s2.limits = reading;
     saveState(home, s2);
-    log(home, 'RUN_END', { taskId: d.taskId, outcome: res.outcome, exitCode: res.code, seconds: res.seconds });
+    log(home, 'RUN_END', { taskId: d.taskId, outcome: res.outcome, exitCode: res.code, seconds: res.seconds, usage: reading ? { status: reading.status, windows: reading.windows, overage: reading.isUsingOverage } : null });
     return { outcome: res.outcome, taskId: d.taskId };
   } finally {
     if (lock) lock(); // acquireLock returns its release function
@@ -103,10 +111,12 @@ export function cleanupDescendants(rootPid, startedAtMs) {
   });
 }
 
-/** Turns, list-price cost and refusals from a run's JSON output (empty object if unreadable). */
+/** Turns, list-price cost and refusals from a run's output: the stream's final "result" line (or a plain JSON file). */
 export function runStats(file) {
   try {
-    const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const text = fs.readFileSync(file, 'utf8');
+    const lines = text.split(/\r?\n/).filter((l) => l.includes('"type":"result"'));
+    const d = JSON.parse(lines.length ? lines[lines.length - 1] : text);
     return { turns: d.num_turns || 0, costUsd: d.total_cost_usd || 0, denials: (d.permission_denials || []).length };
   } catch { return {}; }
 }
@@ -131,9 +141,9 @@ function runClaude({ home, cfg, taskId, spawnImpl }) {
   const promptFile = path.join(home, 'worker-prompt.md');
   if (!fs.existsSync(promptFile)) return Promise.resolve({ outcome: 'NO_PROMPT_FILE', code: null, seconds: 0 });
   const args = ['-p', runPrompt(taskId), '--append-system-prompt-file', promptFile, '--permission-mode', 'auto',
-    '--max-budget-usd', String(cfg.maxBudgetUsd), '--output-format', 'json'];
+    '--max-budget-usd', String(cfg.maxBudgetUsd), '--output-format', 'stream-json', '--verbose'];
   const started = Date.now();
-  const outFile = path.join(home, 'runs', `${new Date(started).toISOString().replace(/[:.]/g, '-')}-${taskId}.json`);
+  const outFile = path.join(home, 'runs', `${new Date(started).toISOString().replace(/[:.]/g, '-')}-${taskId}.jsonl`);
   const out = fs.openSync(outFile, 'w');
   return new Promise((resolve) => {
     // shell: false and the real executable, so the prompt argument can never be re-parsed by a shell.
