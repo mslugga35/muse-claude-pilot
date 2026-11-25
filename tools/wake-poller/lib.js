@@ -20,10 +20,13 @@ export const DEFAULTS = Object.freeze({
   // (T-20261123-12). Every other rule (poster, template, FOR, forbidden projects, other repos, paths) still applies.
   pivexPrefix: 'PIVEX:',
   timeZone: 'America/New_York',
-  windowStart: '08:05', // inclusive, Eastern wall clock
-  windowEnd: '22:05', // inclusive
-  pilotEnd: '2026-11-27', // last Eastern date the poller may wake
-  hourlyCron: '5 0-3,13-23 20-27 11 *', // the existing routine's schedule (UTC); used only to avoid collisions
+  // Continuous operation (owner 2026-11-25): all day. Spend is bounded by maxWakesPerHour and one task in flight.
+  windowStart: '00:00', // inclusive, Eastern wall clock
+  windowEnd: '23:59', // inclusive
+  // Permanent operation since 2026-11-25 (T-20261125-01): no end date. Set pilotEnd to an Eastern date (YYYY-MM-DD)
+  // in config.json to make the poller stop waking after that day.
+  pilotEnd: null,
+  hourlyCron: '5 * * * *', // the routine's schedule (UTC), used only to avoid collisions; PC2 config.json sets the live value
   deferBeforeMin: 5, // hourly run starts within this many minutes -> defer, recheck next poll
   deferAfterMin: 7, // ...and keep deferring until the hourly run has had this long to ACK
   maxWakesPerHour: 3, // successful + uncertain wake attempts in any rolling 60 minutes
@@ -53,6 +56,7 @@ export function inWakeWindow(date, cfg = DEFAULTS) {
 }
 
 export function pilotEnded(date, cfg = DEFAULTS) {
+  if (!cfg.pilotEnd) return false; // no end date configured: permanent operation
   return wallClock(date, cfg.timeZone).date > cfg.pilotEnd;
 }
 

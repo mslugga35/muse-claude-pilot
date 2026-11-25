@@ -18,43 +18,61 @@ const body = ({ type = 'TASK', id = 'T-20261122-01', rev = 0, forWho = 'CC Engin
 const row = (over = {}) => ({ id: 'p1', via: 'Muse', via_number: MUSE, brief: 'TASK T-20261122-01 rev0 for CC Engineer: test', when: 'Sun, Nov 22, 10:00am EST', ...over });
 
 // ---------- window, midnight, DST ----------
+// The old 08:05-22:05 ET window, still supported through config.json; the default is now all day (2026-11-25).
+const NARROW = { ...DEFAULTS, windowStart: '08:05', windowEnd: '22:05' };
+
+test('default window is all day (continuous operation, owner 2026-11-25)', () => {
+  assert.equal(inWakeWindow(at('2026-11-23T08:00:00Z')), true); // 03:00 ET
+  assert.equal(inWakeWindow(at('2026-11-23T05:00:00Z')), true); // 00:00 ET
+  assert.equal(inWakeWindow(at('2026-11-23T04:59:00Z')), true); // 23:59 ET
+});
+
 test('window: 8:05 and 22:05 ET inclusive, 8:04 and 22:06 excluded (EST)', () => {
-  assert.equal(inWakeWindow(at('2026-11-22T13:04:00Z')), false); // 08:04 EST
-  assert.equal(inWakeWindow(at('2026-11-22T13:05:00Z')), true); // 08:05
-  assert.equal(inWakeWindow(at('2026-11-23T03:05:59Z')), true); // 22:05:59
-  assert.equal(inWakeWindow(at('2026-11-23T03:06:00Z')), false); // 22:06
+  assert.equal(inWakeWindow(at('2026-11-22T13:04:00Z'), NARROW), false); // 08:04 EST
+  assert.equal(inWakeWindow(at('2026-11-22T13:05:00Z'), NARROW), true); // 08:05
+  assert.equal(inWakeWindow(at('2026-11-23T03:05:59Z'), NARROW), true); // 22:05:59
+  assert.equal(inWakeWindow(at('2026-11-23T03:06:00Z'), NARROW), false); // 22:06
 });
 
 test('midnight boundary: 23:59 and 00:00 ET are outside the window', () => {
-  assert.equal(inWakeWindow(at('2026-11-23T04:59:00Z')), false);
-  assert.equal(inWakeWindow(at('2026-11-23T05:00:00Z')), false);
-  assert.equal(inWakeWindow(at('2026-11-23T10:00:00Z')), false); // 05:00
+  assert.equal(inWakeWindow(at('2026-11-23T04:59:00Z'), NARROW), false);
+  assert.equal(inWakeWindow(at('2026-11-23T05:00:00Z'), NARROW), false);
+  assert.equal(inWakeWindow(at('2026-11-23T10:00:00Z'), NARROW), false); // 05:00
 });
 
 test('DST: window follows Eastern wall clock across spring-forward and fall-back', () => {
   // 2026-03-08 spring forward: 08:05 EDT = 12:05Z
-  assert.equal(inWakeWindow(at('2026-03-08T12:05:00Z')), true);
-  assert.equal(inWakeWindow(at('2026-03-08T12:04:00Z')), false);
-  assert.equal(inWakeWindow(at('2026-03-09T02:05:00Z')), true); // 22:05 EDT
-  assert.equal(inWakeWindow(at('2026-03-09T02:06:00Z')), false);
+  assert.equal(inWakeWindow(at('2026-03-08T12:05:00Z'), NARROW), true);
+  assert.equal(inWakeWindow(at('2026-03-08T12:04:00Z'), NARROW), false);
+  assert.equal(inWakeWindow(at('2026-03-09T02:05:00Z'), NARROW), true); // 22:05 EDT
+  assert.equal(inWakeWindow(at('2026-03-09T02:06:00Z'), NARROW), false);
   // 2026-11-01 fall back at 02:00 EDT: 08:05 EST = 13:05Z, 12:05Z is 07:05 EST
-  assert.equal(inWakeWindow(at('2026-11-01T12:05:00Z')), false);
-  assert.equal(inWakeWindow(at('2026-11-01T13:05:00Z')), true);
+  assert.equal(inWakeWindow(at('2026-11-01T12:05:00Z'), NARROW), false);
+  assert.equal(inWakeWindow(at('2026-11-01T13:05:00Z'), NARROW), true);
   // 2026-10-31 (still EDT): 12:05Z = 08:05 EDT
-  assert.equal(inWakeWindow(at('2026-10-31T12:05:00Z')), true);
+  assert.equal(inWakeWindow(at('2026-10-31T12:05:00Z'), NARROW), true);
 });
 
-test('pilot end: Nov 27 ET still allowed, Nov 28 ET ended (including late-evening UTC rollover)', () => {
-  assert.equal(pilotEnded(at('2026-11-28T03:00:00Z')), false); // 22:00 ET on Nov 27
-  assert.equal(pilotEnded(at('2026-11-28T05:00:00Z')), true); // 00:00 ET Nov 28
+test('no end date by default: permanent operation (T-20261125-01)', () => {
+  assert.equal(DEFAULTS.pilotEnd, null);
+  assert.equal(pilotEnded(at('2026-11-28T05:00:00Z')), false);
+  assert.equal(pilotEnded(at('2030-01-01T15:00:00Z')), false);
+});
+
+test('optional end date still works, with the late-evening UTC rollover', () => {
+  const cfg = { ...DEFAULTS, pilotEnd: '2026-11-27' };
+  assert.equal(pilotEnded(at('2026-11-28T03:00:00Z'), cfg), false); // 22:00 ET on Nov 27
+  assert.equal(pilotEnded(at('2026-11-28T05:00:00Z'), cfg), true); // 00:00 ET Nov 28
 });
 
 // ---------- cron + collision deferral ----------
 test('cron matcher reads the hourly routine schedule', () => {
   assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-22T13:05:00Z')), true);
   assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-22T03:05:00Z')), true);
-  assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-22T04:05:00Z')), false);
-  assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-28T13:05:00Z')), false);
+  assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-22T04:05:00Z')), true); // hourly, 24/7
+  assert.equal(cronMatches('5 0-3,13-23 * * *', at('2026-11-22T04:05:00Z')), false);
+  assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-28T13:05:00Z')), true); // no month/day limit any more
+  assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-28T13:06:00Z')), false);
   assert.equal(cronMatches('*/15 * * * *', at('2026-11-22T13:30:00Z')), true);
 });
 

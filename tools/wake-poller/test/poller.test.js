@@ -57,8 +57,9 @@ test('new in-window task wakes once; later polls never wake it again', async () 
   assert.equal(w.opens, 1, 'task body opened once, then cached');
 });
 
-test('overnight task: no wake (and no board read) until the first poll at/after 08:05 ET', async () => {
+test('with a configured 08:05-22:05 window: no wake (and no board read) until the first poll at/after 08:05 ET', async () => {
   const h = home(); const w = fakeWorld();
+  fs.writeFileSync(path.join(h, 'config.json'), JSON.stringify({ windowStart: '08:05', windowEnd: '22:05', hourlyCron: '5 0-3,13-23 * * *' }));
   w.post('p1', 'TASK T-20261122-01 rev0 for CC Engineer', 'Sun, Nov 22, 2:00am EST'); w.bodies.p1 = taskBody('p1');
   for (const iso of ['2026-11-22T07:00:00Z', '2026-11-22T12:59:00Z', '2026-11-22T13:04:00Z']) {
     assert.equal((await runOnce({ home: h, now: T(iso), env, fetchImpl: w.fetch })).outcome, 'OUT_OF_WINDOW');
@@ -190,8 +191,9 @@ test('config.json holding a secret is refused', async () => {
   await assert.rejects(runOnce({ home: h, now: T('2026-11-22T15:22:00Z'), env, fetchImpl: w.fetch }), /must not hold secrets/);
 });
 
-test('after the pilot end date nothing runs', async () => {
+test('a configured end date stops the poller after that day', async () => {
   const h = home(); const w = fakeWorld();
+  fs.writeFileSync(path.join(h, 'config.json'), JSON.stringify({ pilotEnd: '2026-11-27' }));
   assert.equal((await runOnce({ home: h, now: T('2026-11-28T15:00:00Z'), env, fetchImpl: w.fetch })).outcome, 'PILOT_ENDED');
   assert.equal(w.authSeen.size, 0);
 });
