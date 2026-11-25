@@ -4,8 +4,13 @@ The one master plan for moving away from Supabase (owner strategy, 2026-11-25, b
 file; there are no competing reports. **Research and planning only: nothing has been migrated, bought, cancelled or
 changed.** No migration work follows from this plan without a separate owner-approved task.
 
+**Version 1.0 (merged), 2026-11-25.** This file reconciles the two drafts into one: the PC2 research (PR #12, first
+version d8b4e45) and the PC1 draft v0.1 (board file `infra/MASTER-MIGRATION-PLAN.md` v1, task xw39q1). That board file
+is superseded by this one. Where the two drafts disagreed, section 12 says what was chosen and why.
+
 > **Public repo.** This file is in a public repository, so it names apps and features only. It has no project ids,
-> table names, connection details, security findings or MM Payments planning. Those stay in private notes.
+> table names, connection details, security details (which key, where, since when) or MM Payments planning. Those
+> stay in private notes.
 
 Status of every fact: **VERIFIED** (checked during this run, source shown), **LAST KNOWN** (from a dated internal
 note, not re-checked today), or **ESTIMATE** (my judgement or a public list price I did not re-check today).
@@ -14,8 +19,13 @@ note, not re-checked today), or **ESTIMATE** (my judgement or a public list pric
 
 ## 1. Owner summary (plain English)
 
-**What you would save.** Not much money, at least not soon. Your Supabase bill was about **$35 to $45 a month** the
-last time anyone checked (May 2026, LAST KNOWN). Most of it is the $25 Pro plan, and HiddenBag needs that plan.
+**Security comes first, migration or not.** Before any app moves, any database admin key that may have been exposed
+gets replaced. Muse is bringing this to you as a separate security decision; it does not wait for this plan, and this
+plan does not start until it is done. (The details stay out of this public file.)
+
+**What you would save.** Not much money, at least not soon. Our best current estimate is about **$35 a month** for
+Supabase (November 9 cost review; nobody has looked at an actual invoice yet). The last bill anyone saw, in May, was
+$35 to $45. Most of it is the $25 Pro plan, and HiddenBag needs that plan.
 HiddenBag and DailyAI stay where they are, as you decided. While they stay, the most we can cut is about **$10 a month**
 (about $120 a year), by closing the second Supabase database. That only works once every app on it has moved.
 The full **$35 to $45 a month** saving comes only if HiddenBag moves one day, and that needs your separate approval.
@@ -34,11 +44,11 @@ small apps stop sharing one database where one mistake hits several sites.
 **Recommendation.**
 1. Stop choosing Supabase for new projects. Use a single-file database (SQLite) or Cloudflare's free database (D1)
    unless the project really needs more. Costs nothing.
-2. Move the small internal tools first, starting with **Mission Control** (section 7). No customers use it, so it is
-   the safest place to prove the process.
-3. Leave HiddenBag, DailyAI and the Team Florida accounting app where they are for now.
-4. Only after two small moves go cleanly, ask you whether closing the second Supabase database (about $10 a month)
-   is worth the work.
+2. First move: **RV Dump Stations** (section 7). Its data is public, it has no logins, it is small, and it already runs
+   on our own server. It also sits in the second Supabase database, so it is a real first step toward closing that one.
+3. Then the other small apps in that second database, one at a time. Leave HiddenBag, DailyAI and the Team Florida
+   accounting app where they are for now.
+4. Once the second database is empty, ask you whether to close it (about $10 a month).
 
 ---
 
@@ -65,13 +75,21 @@ are listed from the internal note and marked that way. Env var names are shown, 
 | AI Calendar | YES (light) | 4 import files, 1 migration; env `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |
 | AI stock research reports | YES (light) | 6 import files, auth calls in 7, 2 migrations; env `NEXT_PUBLIC_SUPABASE_*` |
 | RV Dump Stations, AI Tools HQ, Coaches Corner | YES (LAST KNOWN, PC1) | internal note lists them on the second database; Vercel projects `rv-dump-stations`, `site`, `coaches-corner` exist (VERIFIED names) |
+| AGG map | YES (PC1 draft) | PC1 code scan: the same data is copied in both databases. Not on PC2 |
+| Archon | YES (PC1 draft) | PC1 code scan: uses vector search, low use. Not on PC2 |
+| Every1Raise | YES (PC1 draft) | PC1 code scan: on database A, uses logins; whether it is live is unknown |
+| Leftover jobs in database B | 2 old edge functions + 2 scheduled database jobs from July 2025 (PC1 draft) | Targets unknown. Check what they call, then probably delete (needs approval) |
 | MM Payments | NO on PC2 | `mm-payments` has no Supabase dependency or import. Any further planning stays out of this public repo |
 | Team Florida websites (`TeamFloridaWebsite`, `tf-release-*`) | NO | no Supabase dependency or import |
 | Jemile Weeks site, PupilScale, Oracle HCM tables, r2g-academy, second-brain | NO / not checked deeply | no Supabase dependency in their package files on PC2 |
 
 Databases (LAST KNOWN 2026-05-11): **two** Supabase projects. Database A holds HiddenBag, DailyAI, pickleballcourts,
 Mission Control, LarsHomes and several retired tools. Database B holds Team Florida accounting, Wattz Up, AI Tools HQ,
-RV Dump Stations and Coaches Corner. A third project was deleted on 2026-05-11.
+RV Dump Stations and Coaches Corner. A third project was deleted on 2026-05-11. The PC1 draft adds: HiddenBag is the
+largest (35+ tables, 14 database functions, about 6.4 GB); RV Dump Stations has 5 small tables of public data; DailyAI
+reads HiddenBag's tables, so the two move together or not at all. **Conflict:** the PC1 draft places PeptideFacts on
+database B with its own magic-link logins and full-text search; the PC2 code shows only leftover scripts for a feature
+retired on 2026-11-19. Whichever is right, the live site's runtime use is UNVERIFIED until someone checks it.
 
 ## 3. Features each app uses
 
@@ -116,7 +134,9 @@ the real number from the Supabase billing page before section 9's totals are tru
 | Memory | 3.7 GB total, **0.9 GB available**, swap 2.2 GB of 4 GB **in use** |
 | Disk | 75 GB, 55 GB used, **18 GB free** (76%) |
 | Running | 80 PM2 processes (24 online at the time): HiddenBag, DailyAI, clip, predict, PeptideFacts, pickleballcourts, RV, Wattz, Jemile, ops, SEO and more |
-| PostgreSQL | client tool installed; no database server running |
+| PostgreSQL | PC2 check: client tool installed, no database server seen running. **Conflict:** the PC1 draft (from a 2026-11-09 note) says PostgreSQL 16 runs there for one small tool. Not re-checked in the merge run (server access not available unattended): UNVERIFIED |
+| Backups | PC1 draft: a nightly encrypted pull backup with a nightly restore test already runs. Any new database must be added to it. LAST KNOWN |
+| Price | Conflicting records: $9.99/month or €32.49/month. UNVERIFIED until someone reads the invoice |
 
 **Headroom: effectively none for a database server.** Swap use means memory is already short. A small SQLite app adds
 almost nothing. A PostgreSQL server for HiddenBag-size data would need a bigger server (new spending, owner
@@ -145,21 +165,39 @@ Prices are ESTIMATES from public list prices as I last knew them; re-check befor
 | DailyAI (picks + site) | **Stay on Supabase** | Owner rule. Shares HiddenBag's database, so it moves with HiddenBag, if ever |
 | Team Florida accounting | **Stay for now**; later Neon + Better Auth | Heavy auth (phone/Apple sign-in) and 35 DB functions; read-only for us; moving logins for parents and coaches is high risk |
 | PeptideFacts | **Drop the dependency** (no database) | Runtime feature retired; only leftover scripts remain. Removal is a code change that needs the normal PeptideFacts owner release approval |
-| Mission Control | **SQLite** (first move) | Internal, server key only, no user logins, few files |
+| Mission Control | **SQLite** (optional rehearsal) | Internal, server key only, no user logins, few files. It is on database A, which stays, so moving it saves nothing; useful only as a dry run of the checklist |
+| AGG map | **SQLite on Hetzner**, and remove the duplicate copy | Same shape as RV Dump Stations |
+| Archon | **Local Postgres with vectors, or retire** | Low use; confirm it is still needed first |
+| Every1Raise | **Decide after confirming it is live** | Don't migrate what may be dead |
 | AI Calendar, AI stock research | **SQLite or Neon free**, or archive if unused | Light use; check whether either is still live before any work |
 | Wattz Up | **D1 or Neon free**, or archive | Light use; Vercel project not updated since March 2026 |
-| RV Dump Stations / AI Tools HQ / Coaches Corner | **Static build from a data snapshot, D1 if writes are needed** | Read-mostly directories; this removes the egress driver |
+| RV Dump Stations | **SQLite on Hetzner** (first move) | Public data, no logins, 5 small tables, already served from Hetzner; removes database B's main egress driver |
+| AI Tools HQ | **Static data in the build, or D1** | Reads data only at build time; already on Cloudflare Pages |
+| Coaches Corner | **Decide after confirming it is live** | Uses logins; don't migrate what may be dead |
 | LarsHomes | **Stay for now**; later Neon + R2 + Better Auth | Uses storage and edge functions; more parts to move |
 | pickleballcourts.cc | **Stay for now** (on HiddenBag's DB) | Not on PC2 to inspect; later SQLite/D1 like the directories |
 | ClipRush, MM Payments, TF websites | **No change** | They do not use Supabase |
 
-**First migration candidate: Mission Control → SQLite.** It is internal (no customers, no logins), uses only the
-server key in about three files, and has no migrations to carry. If it breaks, nothing outside our team notices, and
-switching back is one env var. It proves the checklist below end to end at near-zero risk. It saves no money on its
-own; money comes only when a whole database is emptied (section 9).
+**First migration candidate: RV Dump Stations → SQLite on Hetzner.** (The two drafts disagreed; this one wins.)
+Why: its data is public, so a mistake cannot leak anyone's personal data; it has no logins to break; it has 5 small
+tables; it already runs on the Hetzner server, so nothing new is hosted and a SQLite file adds almost no memory; and it
+lives in database B, so it is the first real step toward the only saving this plan offers (closing B, section 9). It
+also removes B's main egress driver. Mission Control is lower-risk still (no customers), but it sits in database A,
+which stays, so moving it proves the process without moving us toward the goal. It stays available as an optional
+dry run if Muse or the owner wants one first.
+
+RV Dump steps (following section 8): full export of its tables, Supabase left untouched as the fallback; SQLite build
+behind a switch (`DB_BACKEND=sqlite|supabase`) on a branch; row counts and checksums per table must match, plus a
+20-listing spot check; the site's tests and page checks on the top pages and the submission form; switch in a quiet
+hour; Supabase copy read-only for 14 days; roll back by flipping the switch (minutes). It is a public site, so a bad
+cutover is visible: that is why the switch and the 14-day fallback are required. UNVERIFIED before starting: that the
+Hetzner copy is the live one, and the current table sizes.
 
 ## 8. Reusable migration checklist (every future move)
 
+0. **Security precondition (blocks every move):** any database key known or suspected to be exposed for the app's
+   database has been rotated, and the rotation verified. Rotate before removing a key from code, never after. Status
+   is tracked privately, not in this repo. This is separate from migration and is not delayed by it.
 1. **Owner-approved task** naming the app, the target and any spending. Risk tier stated (most data moves are High).
 2. **Inventory**: tables, row counts, auth users, storage files, functions and jobs the app touches; who else shares them.
 3. **Backup before anything**: full dump of the app's data plus a copy in R2 or offline; prove the restore works on a
@@ -176,20 +214,26 @@ own; money comes only when a whole database is emptied (section 9).
     and redeploy, plus re-sync any writes made since cutover (plan this step before cutover).
 11. **Close-out**: only after the 14 days and owner OK, remove the app's Supabase data; cancel nothing until the
     whole database is empty and the owner approves.
+12. **Backups going forward**: add the new database to the server's nightly backup and its restore test before the
+    rollback window ends. A backup that has never been restored does not count.
 
 ## 9. Money table (monthly)
 
-| Item | Now | After recommended moves (HiddenBag + DailyAI stay) | Status |
-|---|---|---|---|
-| Supabase Pro base | $25 | $25 (HiddenBag still needs it) | LAST KNOWN |
-| Database A compute | $9.97 (largely covered by Pro credit, UNVERIFIED) | $9.97 | LAST KNOWN |
-| Database B compute + egress | $9.97 + egress | **$0** only if all of Team Florida accounting, Wattz Up, AI Tools HQ, RV Dump and Coaches Corner move | LAST KNOWN / ESTIMATE |
-| New: Neon / D1 / R2 for moved apps | $0 | $0–5 (free tiers; R2 backups a few cents) | ESTIMATE |
-| New: bigger Hetzner server | $0 | $0 (not needed for SQLite/D1 moves); $8–15 only if self-hosted Postgres is chosen later | ESTIMATE |
-| **Total** | **about $35–45** (current bill UNVERIFIED) | **about $25–40**; saving **about $0–10**/month in this phase | ESTIMATE |
-| If HiddenBag + DailyAI ever move (separate owner decision) | | about $8–20 (server upgrade + backups) instead of $35–45 | ESTIMATE |
+One table for both drafts. Headline figure: **about $35.50/month** (ESTIMATE, PC1 cost review 2026-11-09: Pro $25 +
+two micro computes − $10 compute credit; no invoice checked). The May 2026 bill ($35–45, LAST KNOWN) is the older
+reading and agrees within the range. No number here is VERIFIED from an invoice.
 
-Per-app split of today's bill is not possible: Supabase bills per project, not per app.
+| Stage | Supabase | Hetzner | Saving vs today | Status |
+|---|---|---|---|---|
+| Today | ~$35.50 (Pro $25 + compute A $9.97 + compute B $9.97 − $10 credit, plus B egress) | $9.99 or €32.49 (conflicting records) | baseline | ESTIMATE (Supabase); UNVERIFIED (Hetzner) |
+| RV Dump Stations moved (first move) | ~$35.50 (egress may drop) | same; SQLite needs no upgrade | ~$0 | ESTIMATE |
+| Database B emptied and removed (RV Dump, AGG map, AI Tools HQ, Wattz Up, Coaches Corner, PeptideFacts leftovers and Team Florida accounting all moved) | ~$25 | same, if they all fit SQLite/D1; Team Florida accounting may need more server (quote first) | **~$10/mo** | ESTIMATE |
+| Small apps on A moved | ~$25 (Pro stays while HiddenBag is there) | same | ~$10/mo | ESTIMATE |
+| New: Neon / D1 / R2 for moved apps | | | −$0–5 (free tiers; R2 backups a few cents) | ESTIMATE |
+| A emptied (HiddenBag + DailyAI moved; separate owner decision) | $0 | + server upgrade or second box, about $8–15 (quote first, **no purchase without approval**) | ~$20–27/mo net | ESTIMATE |
+
+Per-app split of today's bill is not possible: Supabase bills per project, not per app. Near-term saving while
+HiddenBag and DailyAI stay: **$0–10 a month**.
 
 ## 10. DailyAI reporting
 
@@ -212,3 +256,24 @@ works (UNVERIFIED). Guidance, so it does not grow Supabase use:
 6. Which of AI Calendar, AI stock research, Wattz Up and Coaches Corner are still live or used.
 7. The DailyAI restricted reporting setup (section 10).
 8. Current Neon, Cloudflare and Hetzner list prices. All prices in sections 5, 6 and 9 are estimates.
+9. The Hetzner monthly price ($9.99 vs €32.49 in different records).
+10. Whether PostgreSQL runs on Hetzner today (the two drafts disagree, section 5).
+11. Which database PeptideFacts uses and whether the live site reads it (section 2).
+12. What the leftover edge functions and scheduled jobs in database B call.
+13. The status of the exposed-key rotation (tracked privately; raised to the owner by Muse).
+14. PC1 draft facts not re-checked from PC2: AGG map, Archon, Every1Raise, HiddenBag size, RV Dump table count.
+
+## 12. How the two drafts were reconciled
+
+| Point | PC2 draft (PR #12 v1) | PC1 draft (board file v1) | Merged plan | Why |
+|---|---|---|---|---|
+| First move | Mission Control → SQLite | RV Dump Stations → SQLite | **RV Dump Stations** | Same low risk (public data, no logins, already on Hetzner), and it moves us toward closing database B, the only saving available; Mission Control is in A, which stays. Mission Control kept as an optional dry run |
+| Money | $35–45 (May bill) | ~$35.50 (Nov 9 estimate) | One table, headline ~$35.50, May range kept as context | Nov 9 is the newer reading; both are unverified and both say the near-term saving is ~$0–10 |
+| Security | not covered (public-repo rule) | two exposed admin keys, rotate first | Step 0 in the checklist + owner summary, details kept private | Rotation is urgent and separate from migration; the details must not be published in a public repo |
+| Hetzner memory | 0.9 GB free (checked 11-25) | ~420 MB free (11-09) | 11-25 reading | Newer and checked directly; both say no room for a database server |
+| Coverage | more PC2 apps (AI Calendar, AI stock research, LarsHomes detail) | AGG map, Archon, Every1Raise, B leftovers | Union of both | One inventory |
+
+## 13. Owner decisions this plan will ask for (one at a time, plain English, after Muse's review)
+1. Rotate the exposed admin keys (Muse is raising this now, separately; urgent).
+2. Approve RV Dump Stations as the first move.
+3. Later, and only with a price quote first: more server capacity before any large or sensitive app moves.
