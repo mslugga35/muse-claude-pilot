@@ -6,7 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 // Tests must not depend on how much memory the machine running them has free (PC2 is often low): pin it.
 os.freemem = () => 8 * 1024 ** 3;
-import { WORKER_DEFAULTS as D, harnessTasks, decideRun, recordStart, runsToday, runPrompt, readingFromStream, usageGate, recordSkip, inactivitySummary, weeklyCeilingAt, recordReading, subscriptionSummary } from '../lib.js';
+import { WORKER_DEFAULTS as D, harnessTasks, decideRun, recordStart, runsToday, runPrompt, readingFromStream, usageGate, recordSkip, inactivitySummary } from '../lib.js';
 import { checkOnce } from '../worker.js';
 
 const T = (s) => new Date(s);
@@ -14,14 +14,6 @@ const NOON = T('2026-11-25T17:00:00Z'); // 12:00 ET
 const task = (id, extra = {}) => ({ id, status: 'open', by: 'you', via: 'Muse', for: 'Pilot Harness (Claude Code PC2)', title: `t ${id}`,
   created_at: '2026-11-24T10:00:00Z', ...extra });
 const empty = () => ({ runs: [], attempts: {} });
-// A real rate_limit_event line as Claude Code 2026-11 prints it in stream-json mode (ids removed).
-const EV = (info) => JSON.stringify({ type: 'rate_limit_event', rate_limit_info: info });
-const OK_EVENT = EV({ status: 'allowed_warning', resetsAt: 1795626000, rateLimitType: 'seven_day', utilization: 0.78, overageStatus: 'rejected',
-  overageDisabledReason: 'org_level_disabled', isUsingOverage: false, surpassedThreshold: 0.75,
-  unifiedWindows: { seven_day: { utilization: 0.78, resetsAt: 1795626000, status: 'allowed_warning', surpassedThreshold: 0.75 } }, overageEnabled: false });
-const REFUSED = EV({ status: 'rejected', resetsAt: 1795640400, rateLimitType: 'five_hour', utilization: 1, isUsingOverage: false, overageEnabled: false,
-  unifiedWindows: { five_hour: { utilization: 1, resetsAt: 1795640400, status: 'rejected' } } }); // resets 21:00Z
-
 
 test('only open tasks for the harness count, oldest first; ids validated', () => {
   const rows = [task('b2', { created_at: '2026-11-25T01:00:00Z' }), task('a1'), task('c3', { for: 'Muse' }),
@@ -79,14 +71,10 @@ test('runs the oldest task, then respects the gap, the retry delay and the per-t
 test('no fixed daily cap: 6+ runs keep going; only the runaway fuse (Eastern date) stops a loop', () => {
   let s = empty();
   for (let i = 0; i < 6; i += 1) s = recordStart(s, `x${i}`, new Date(+T('2026-11-25T13:10:00Z') + i * 30 * 60000));
-  assert.equal(decideRun({ now: T('2026-11-25T23:00:00Z'), openRows: [task('a1')], state: s }).reason, 'USAGE_UNKNOWN_CAP', 'no reading: old safe cap');
-  s.limits = readingFromStream(OK_EVENT, T('2026-11-25T22:50:00Z'));
-  s.limits.windows.seven_day.resetsAt = +T('2026-11-29T17:00:00Z');
   assert.equal(decideRun({ now: T('2026-11-25T23:00:00Z'), openRows: [task('a1')], state: s }).action, 'RUN', 'owner: never stop at six');
   for (let i = 6; i < D.fuseRunsPerDay; i += 1) s = recordStart(s, `x${i}`, new Date(+T('2026-11-25T13:10:00Z') + i * 60000));
   assert.equal(runsToday(s, NOON), D.fuseRunsPerDay);
   assert.equal(decideRun({ now: T('2026-11-25T23:00:00Z'), openRows: [task('a1')], state: s }).reason, 'FUSE');
-  delete s.limits;
   assert.equal(runsToday(s, T('2026-11-26T14:00:00Z')), 0);
 });
 
@@ -99,7 +87,7 @@ function home() { return fs.mkdtempSync(path.join(os.tmpdir(), 'pc2w-')); }
 function fakeSpawn(code = 0) {
   const calls = [];
   const impl = (cmd, args, opts) => {
-    if (!args.includes('Reply with the single word ok.')) calls.push({ cmd, args, opts });
+    calls.push({ cmd, args, opts });
     const c = new EventEmitter(); c.kill = () => {};
     setImmediate(() => c.emit('exit', code, null));
     return c;
@@ -284,6 +272,14 @@ test('daily usage summary: runs, minutes, list-price total, per task, outcomes (
 });
 
 // ---- Subscription usage (T-20261125-05) ----
+// A real rate_limit_event line as Claude Code 2026-11 prints it in stream-json mode (ids removed).
+const EV = (info) => JSON.stringify({ type: 'rate_limit_event', rate_limit_info: info });
+const OK_EVENT = EV({ status: 'allowed_warning', resetsAt: 1795626000, rateLimitType: 'seven_day', utilization: 0.78, overageStatus: 'rejected',
+  overageDisabledReason: 'org_level_disabled', isUsingOverage: false, surpassedThreshold: 0.75,
+  unifiedWindows: { seven_day: { utilization: 0.78, resetsAt: 1795626000, status: 'allowed_warning', surpassedThreshold: 0.75 } }, overageEnabled: false });
+const REFUSED = EV({ status: 'rejected', resetsAt: 1795640400, rateLimitType: 'five_hour', utilization: 1, isUsingOverage: false, overageEnabled: false,
+  unifiedWindows: { five_hour: { utilization: 1, resetsAt: 1795640400, status: 'rejected' } } }); // resets 21:00Z
+
 test('usage reading: parsed from the stream, newest event wins, junk ignored', () => {
   const r = readingFromStream(`{"type":"system"}\nnot json\n${OK_EVENT}\n{"type":"result"}`, NOON);
   assert.equal(r.windows.seven_day.utilization, 0.78);
@@ -295,9 +291,8 @@ test('usage reading: parsed from the stream, newest event wins, junk ignored', (
 
 test('usage gate: work at any utilization; pause on refusal until the reset, then resume by itself', () => {
   const ok = readingFromStream(OK_EVENT, NOON);
-  assert.equal(usageGate(ok, T('2026-11-25T14:00:00Z')), null, '78% weekly < 85%: keep working');
-  assert.deepEqual(usageGate(null, NOON, D, { canProbe: true }), { probe: true }, 'no reading: probe first');
-  assert.deepEqual(usageGate(null, NOON), { fallback: true }, 'no reading and no probe: safe fallback cap');
+  assert.equal(usageGate(ok, NOON), null, '78% weekly: keep working (owner: if I hit the limit I hit it)');
+  assert.equal(usageGate(null, NOON), null, 'no reading yet: work');
   const refused = readingFromStream(REFUSED, NOON);
   const g = usageGate(refused, T('2026-11-25T18:00:00Z'));
   assert.deepEqual([g.reason, g.until], ['LIMIT_PAUSE', '2026-11-25T21:00:00.000Z']);
@@ -335,7 +330,7 @@ test('checkOnce: streams output, stores the live usage reading, next check pause
     const c = new EventEmitter(); c.kill = () => {}; setImmediate(() => c.emit('exit', 0, null)); return c;
   };
   const now = T('2026-11-25T18:00:00Z');
-  await checkOnce({ home: h, now, env, spawnImpl: impl, probeImpl: async () => null, readTasks: async () => [task('a1'), task('b2')] });
+  await checkOnce({ home: h, now, env, spawnImpl: impl, readTasks: async () => [task('a1'), task('b2')] });
   const a = calls[0];
   assert.equal(a[a.indexOf('--output-format') + 1], 'stream-json'); assert.ok(a.includes('--verbose'));
   const st = JSON.parse(fs.readFileSync(path.join(h, 'state.json'), 'utf8'));
@@ -348,65 +343,4 @@ test('checkOnce: streams output, stores the live usage reading, next check pause
   assert.equal(st2.periods.at(-1).reason, 'LIMIT_PAUSE');
   const u = JSON.parse(fs.readFileSync(path.join(h, 'usage-summary.json'), 'utf8'));
   assert.ok(u.today.latestUsageReading && u.today.inactivity);
-});
-
-test('owner reserve: stop task runs at 85% weekly; release the reserve toward the reset (92% last day, 97% last 6 h)', () => {
-  const reset = +T('2026-12-02T17:00:00Z');
-  const at = (u, now) => { const r = readingFromStream(OK_EVENT, now); r.windows.seven_day = { utilization: u, resetsAt: reset, status: 'allowed_warning' }; return r; };
-  const early = T('2026-11-27T12:00:00Z'); // 5 days before the reset
-  assert.equal(weeklyCeilingAt(reset, early), 0.85);
-  assert.equal(weeklyCeilingAt(reset, T('2026-12-01T18:00:00Z')), 0.92);
-  assert.equal(weeklyCeilingAt(reset, T('2026-12-02T12:00:00Z')), 0.97);
-  assert.equal(usageGate(at(0.84, early), early), null);
-  const g = usageGate(at(0.85, early), early);
-  assert.deepEqual([g.reason, g.until, g.ceiling], ['OWNER_RESERVE_WEEKLY', '2026-12-02T17:00:00.000Z', 0.85]);
-  const lastDay = T('2026-12-01T18:00:00Z');
-  assert.equal(usageGate(at(0.9, lastDay), lastDay), null, 'unused reserve released on the last day');
-  assert.equal(usageGate(at(0.93, lastDay), lastDay).reason, 'OWNER_RESERVE_WEEKLY');
-  const after = T('2026-12-02T17:10:00Z');
-  assert.equal(usageGate(at(0.99, T('2026-12-02T16:59:00Z')), after), null, 'week reset: resume automatically');
-});
-
-test('owner reserve: task runs pause, but the one daily report run still happens (monitoring continues)', () => {
-  const now = T('2026-11-27T15:00:00Z');
-  const r = readingFromStream(OK_EVENT, now); r.windows.seven_day = { utilization: 0.9, resetsAt: +T('2026-12-02T17:00:00Z'), status: 'allowed_warning' };
-  let s = { ...empty(), limits: r };
-  const d = decideRun({ now, openRows: [task('a1')], state: s });
-  assert.deepEqual([d.action, d.taskId], ['RUN', 'REPORT']);
-  assert.match(runPrompt('REPORT'), /Do not work on any task/);
-  s = recordStart(s, 'REPORT', now);
-  assert.deepEqual(s.attempts, {}, 'the report run is not a task attempt');
-  assert.equal(decideRun({ now: new Date(+now + 3600000), openRows: [task('a1')], state: s }).reason, 'OWNER_RESERVE_WEEKLY');
-});
-
-test('stale readings: refreshed by a probe only when they were high; otherwise work', () => {
-  const now = T('2026-11-27T15:00:00Z'); const old = new Date(+now - 3 * 3600000);
-  const mk = (u) => { const r = readingFromStream(OK_EVENT, old); r.windows.seven_day = { utilization: u, resetsAt: +T('2026-12-02T17:00:00Z'), status: 'allowed' }; return r; };
-  assert.equal(usageGate(mk(0.4), now, D, { canProbe: true }), null);
-  assert.deepEqual(usageGate(mk(0.8), now, D, { canProbe: true }), { probe: true });
-  assert.deepEqual(usageGate(mk(0.8), now), { fallback: true }, 'probe failed: safe fallback cap');
-  assert.equal(decideRun({ now, openRows: [task('a1')], state: { ...empty(), limits: mk(0.8) }, canProbe: true }).action, 'PROBE');
-  const quiet = readingFromStream(EV({ status: 'allowed', resetsAt: 1795626000, overageEnabled: false, isUsingOverage: false }), old);
-  assert.equal(quiet.belowWarning, true);
-  assert.equal(usageGate(quiet, now, D, { canProbe: true }), null, 'below the warning level: work');
-});
-
-test('checkOnce: probes when needed, records real percentages for the daily report', async () => {
-  const h = home(); fs.writeFileSync(path.join(h, 'worker-prompt.md'), 'x'); const sp = fakeSpawn(0);
-  let probes = 0;
-  const probeImpl = async () => { probes += 1; const r = readingFromStream(OK_EVENT, T('2026-11-25T14:00:00Z')); r.windows.seven_day.resetsAt = +T('2026-11-29T17:00:00Z'); return r; };
-  const r = await checkOnce({ home: h, now: T('2026-11-25T14:00:00Z'), env, spawnImpl: sp.impl, probeImpl, readTasks: async () => [task('a1')] });
-  assert.equal(r.outcome, 'EXITED_OK'); assert.equal(probes, 1); assert.equal(sp.calls.length, 1);
-  const st = JSON.parse(fs.readFileSync(path.join(h, 'state.json'), 'utf8'));
-  const sub = subscriptionSummary(st, '2026-11-25');
-  assert.deepEqual([sub.readings, sub.weeklyPercentLast, sub.extraUsageSeen], [1, 78, false]);
-  assert.match(fs.readFileSync(path.join(h, 'worker.log'), 'utf8'), /"PROBE".*"ok":true/);
-});
-
-test('probe failure: no reading means the old safe cap, never unlimited', async () => {
-  const h = home(); fs.writeFileSync(path.join(h, 'worker-prompt.md'), 'x'); const sp = fakeSpawn(0);
-  const st = { runs: Array.from({ length: 6 }, (_, i) => ({ taskId: `x${i}`, startedAt: `2026-11-25T1${i}:00:00Z` })), attempts: {} };
-  fs.writeFileSync(path.join(h, 'state.json'), JSON.stringify(st));
-  const r = await checkOnce({ home: h, now: T('2026-11-25T20:00:00Z'), env, spawnImpl: sp.impl, probeImpl: async () => null, readTasks: async () => [task('a1')] });
-  assert.equal(r.outcome, 'USAGE_UNKNOWN_CAP'); assert.equal(sp.calls.length, 0);
 });

@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Crosswalk, acquireLock } from '../wake-poller/poller.js';
 import { DEFAULTS as POLLER } from '../wake-poller/lib.js';
-import { WORKER_DEFAULTS, decideRun, recordStart, recordSkip, recordReading, readingFromStream, runPrompt, usageSummary } from './lib.js';
+import { WORKER_DEFAULTS, decideRun, recordStart, recordSkip, readingFromStream, runPrompt, usageSummary } from './lib.js';
 import { wallClock } from '../wake-poller/lib.js';
 
 export function workerHome() { return path.join(process.env.LOCALAPPDATA || '.', 'muse-ops-worker'); }
@@ -47,7 +47,7 @@ export async function readOpenTasks({ key, fetchImpl = fetch }) {
   return { open, rows };
 }
 
-export async function checkOnce({ home = workerHome(), now = new Date(), env = process.env, fetchImpl = fetch, spawnImpl = spawn, readTasks = readOpenTasks, freeMemImpl = os.freemem, cleanupImpl = cleanupDescendants, probeImpl = probeUsage, dryRun = false } = {}) {
+export async function checkOnce({ home = workerHome(), now = new Date(), env = process.env, fetchImpl = fetch, spawnImpl = spawn, readTasks = readOpenTasks, freeMemImpl = os.freemem, cleanupImpl = cleanupDescendants, dryRun = false } = {}) {
   fs.mkdirSync(path.join(home, 'runs'), { recursive: true });
   const cfg = loadCfg(home);
   const paused = fs.existsSync(path.join(home, 'PAUSE'));
@@ -62,17 +62,9 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
         log(home, 'CHECK', { outcome: 'BOARD_READ_FAILED', error: String(e.message).slice(0, 120) }); return { outcome: 'BOARD_READ_FAILED' };
       }
     }
-    let state = loadState(home);
+    const state = loadState(home);
     try { writeUsage(home, now, cfg); } catch { /* reporting must never block work */ }
-    const input = { now, openRows, running, paused, boardRows, freeMemoryMB: freeMemImpl() / 1048576, cfg };
-    let d = decideRun({ ...input, state, canProbe: !dryRun });
-    if (d.action === 'PROBE') {
-      // A task is ready but the usage reading is missing or stale-and-high: one tiny call refreshes it.
-      const reading = await probeImpl({ home, cfg, spawnImpl });
-      log(home, 'PROBE', { ok: !!reading, status: reading && reading.status, windows: reading && reading.windows });
-      if (reading) { state = recordReading(loadState(home), reading); saveState(home, state); }
-      d = decideRun({ ...input, state, canProbe: false });
-    }
+    const d = decideRun({ now, openRows, state, running, paused, boardRows, freeMemoryMB: freeMemImpl() / 1048576, cfg });
     if (d.action !== 'RUN') {
       log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting, freeMemoryMB: d.freeMemoryMB, until: d.until });
       if (!running) { try { saveState(home, recordSkip(loadState(home), d.reason, now)); } catch { /* reporting only */ } }
@@ -91,7 +83,8 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
     // The run's own output carries the subscription's live usage (weekly / 5-hour utilization, reset time, extra-usage
     // status). Keep the latest: the next check pauses on a refusal until the reset, and never runs with extra usage on.
     let reading = null; try { reading = readingFromStream(fs.readFileSync(res.outFile, 'utf8')); } catch { /* no output */ }
-    saveState(home, recordReading(s2, reading));
+    if (reading) s2.limits = reading;
+    saveState(home, s2);
     log(home, 'RUN_END', { taskId: d.taskId, outcome: res.outcome, exitCode: res.code, seconds: res.seconds, usage: reading ? { status: reading.status, windows: reading.windows, overage: reading.isUsingOverage } : null });
     return { outcome: res.outcome, taskId: d.taskId };
   } finally {
@@ -136,28 +129,6 @@ export function writeUsage(home, now = new Date(), cfg = WORKER_DEFAULTS) {
   const out = { generatedAt: now.toISOString(), today: usageSummary(state, today, cfg), yesterday: usageSummary(state, yesterday, cfg) };
   fs.writeFileSync(path.join(home, 'usage-summary.json'), JSON.stringify(out, null, 2));
   return out;
-}
-
-/**
- * One tiny call (Haiku, one turn, no project settings) just to read the subscription's usage from its rate_limit_event.
- * Run only when a task is ready and the last reading is missing or stale-and-high. Returns a reading or null.
- */
-export function probeUsage({ home, cfg, spawnImpl = spawn }) {
-  const dir = path.join(home, 'probe'); fs.mkdirSync(dir, { recursive: true });
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) if (/CROSSWALK_POLLER_KEY|ROUTINE_FIRE_TOKEN/i.test(k)) delete env[k];
-  const args = ['-p', 'Reply with the single word ok.', '--model', 'haiku', '--max-turns', '1', '--setting-sources', 'project',
-    '--output-format', 'stream-json', '--verbose'];
-  return new Promise((resolve) => {
-    let out = ''; let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    let child;
-    try { child = spawnImpl(claudeExe(cfg), args, { cwd: dir, env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, shell: false }); } catch { finish(null); return; }
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } finish(readingFromStream(out)); }, 120 * 1000);
-    if (child.stdout) child.stdout.on('data', (b) => { out += b; });
-    child.on('exit', () => { clearTimeout(timer); finish(readingFromStream(out)); });
-    child.on('error', () => { clearTimeout(timer); finish(null); });
-  });
 }
 
 export function claudeExe(cfg) {

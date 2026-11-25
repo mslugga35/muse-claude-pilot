@@ -6,7 +6,6 @@
 - Worker reads the subscription's live usage from each run (stream-json `rate_limit_event`): pauses on refusal until the reset, resumes itself; never runs while paid extra usage is on.
 - A task past 2 runs/day yields to other ready tasks but is never stopped when alone. Runaway fuse 40/day. Gap 10 min.
 - usage-summary.json adds inactivity minutes per reason, long idle periods and the latest usage reading.
-- Owner reserve: task runs stop at 85% of the weekly limit, released to 92% (last 24 h) and 97% (last 6 h) before the reset; one daily report run continues while paused; real weekly percentages in the daily report; stale-high readings refreshed by a tiny probe; no reading = safe 6/day fallback.
 
 ## 2026-11-25 — T-20261125-04: worker scheduling and memory hygiene (PR #11)
 - Priority lanes (DEPLOY → this repo → other projects), fair order, max 2 runs per task per day, 45-min run limit.

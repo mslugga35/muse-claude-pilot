@@ -12,18 +12,9 @@ export const WORKER_DEFAULTS = Object.freeze({
   // from it). A task added by any other board member is never worked, whatever it is addressed to.
   trustedBy: ['you'],
   trustedVia: ['muse', 'owner', 'mpmmorales', ''],
-  // Work whenever there is work; no fixed daily cap (owner 2026-11-25). Paced by the subscription's REAL usage, which
-  // Claude Code reports on every call (rate_limit_event). Owner 2026-11-25 (second message): "reserve 15% of my weekly
-  // Claude usage for my personal sessions" ... "If we are approaching the weekly reset and reserved capacity remains
-  // unused, allow the worker to use more of it while maintaining a small personal reserve."
-  weeklyCeiling: 0.85, // no new run at or above 85% of the weekly limit (15% kept for the owner)
-  weeklyCeilingLastDay: 0.92, // within 24 h of the weekly reset: up to 92% (unused reserve released, 8% kept)
-  weeklyCeilingLastHours: 0.97, // within 6 h of the reset: up to 97% (3% kept)
-  limitReadingMaxAgeMinutes: 60, // a reading older than this is refreshed by one tiny probe call before a run ...
-  probeWhenStaleAbove: 0.7, // ... but only when it was already high (the owner's own use may have pushed it up)
-  fallbackRunsPerDay: 6, // when no reading can be had at all: the old fixed cap, a safe fallback (USAGE_UNKNOWN_CAP)
-  // When the subscription refuses calls, the worker pauses until the reported reset and resumes on its own. It never
-  // runs while paid extra usage is on (OVERAGE_GUARD).
+  // Work whenever there is work (owner 2026-11-25, T-20261125-05: "dont worry about the limit and work if i hit the
+  // limit i hit the limit"). No fixed daily cap. When the subscription refuses calls, the worker pauses until the reset
+  // time Claude Code reports, then resumes on its own. It never runs while paid extra usage is on (OVERAGE_GUARD).
   fuseRunsPerDay: 40, // runaway fuse (a loop bug), not a work target: real runs take 15-45 min each
   idleCheckPerDay: true, // with no open harness task: at most ONE short run per day (QUEUE EMPTY + next known item)
   minGapMinutes: 10, // between run starts (= the scheduler interval: back-to-back when there is work)
@@ -113,7 +104,7 @@ export function usageSummary(state, date, cfg = WORKER_DEFAULTS) {
     listPriceUsd: Math.round(sum('costUsd') * 100) / 100, turns: sum('turns'), permissionDenials: sum('denials'),
     byTask, outcomes: runs.reduce((a, r) => { a[r.outcome || 'RUNNING'] = (a[r.outcome || 'RUNNING'] || 0) + 1; return a; }, {}),
     note: 'list-price equivalent as reported by Claude Code; billed against the owner subscription, not dollars',
-    subscription: subscriptionSummary(state, date, cfg), inactivity: inactivitySummary(state, date, cfg), latestUsageReading: state.limits || null,
+    inactivity: inactivitySummary(state, date, cfg), latestUsageReading: state.limits || null,
   };
 }
 
@@ -137,77 +128,26 @@ export function readingFromStream(text, observedAt = new Date()) {
   };
   for (const [name, w] of Object.entries(ev.unifiedWindows || {})) put(name, w);
   if (ev.rateLimitType && !windows[ev.rateLimitType]) put(ev.rateLimitType, ev);
-  const status = String(ev.status || '');
   return {
-    observedAt: new Date(observedAt).toISOString(), status, resetsAt: Number(ev.resetsAt) * 1000 || null,
+    observedAt: new Date(observedAt).toISOString(), status: String(ev.status || ''), resetsAt: Number(ev.resetsAt) * 1000 || null,
     windows, overageEnabled: ev.overageEnabled === true, isUsingOverage: ev.isUsingOverage === true,
-    // The service sends utilization only once a window passes a warning threshold; plain "allowed" with no numbers means
-    // every window is below its first warning level.
-    belowWarning: status === 'allowed' && !Object.keys(windows).length,
   };
-}
-
-/** Highest weekly utilization at which the worker may start a run: 85%, released toward the reset (owner rule). */
-export function weeklyCeilingAt(resetsAtMs, now, cfg = WORKER_DEFAULTS) {
-  const left = resetsAtMs ? resetsAtMs - now : Infinity;
-  if (left <= 6 * 3600 * 1000) return cfg.weeklyCeilingLastHours;
-  if (left <= 24 * 3600 * 1000) return cfg.weeklyCeilingLastDay;
-  return cfg.weeklyCeiling;
 }
 
 /**
- * Gate from the latest usage reading (from the previous run's own output, or a probe). Returns null (go) or:
- *  { reason: 'OVERAGE_GUARD' }  paid extra usage is on or in use: no runs at all (owner approval required).
- *  { reason: 'LIMIT_PAUSE', until }  the subscription refused: no runs until the reported reset, then resume.
- *  { reason: 'OWNER_RESERVE_WEEKLY', until, ceiling }  the worker's share of the week is used: no TASK runs until
- *     the reset (one daily report run is still allowed, see decideRun).
- *  { probe: true }  reading missing, or stale while high: refresh it with one tiny call before running.
- *  { fallback: true }  no usable reading: run under fallbackRunsPerDay (the old safe cap).
+ * Gate from the latest usage reading (taken from the previous run's own output; no extra calls). Returns null (go)
+ * or a skip { reason, until? }:
+ *  OVERAGE_GUARD: paid extra usage is on or in use. Owner rule: never spend it without approval, so no runs.
+ *  LIMIT_PAUSE: the subscription refused calls; resume automatically after the reported reset time.
  */
-export function usageGate(reading, now, cfg = WORKER_DEFAULTS, { canProbe = false } = {}) {
-  const fresh = reading && now - Date.parse(reading.observedAt) < cfg.limitReadingMaxAgeMinutes * MIN;
-  if (reading && (reading.overageEnabled || reading.isUsingOverage)) return { reason: 'OVERAGE_GUARD' };
-  const refusals = reading ? [{ status: reading.status, resetsAt: reading.resetsAt }, ...Object.values(reading.windows || {})] : [];
+export function usageGate(reading, now) {
+  if (!reading) return null;
+  if (reading.overageEnabled || reading.isUsingOverage) return { reason: 'OVERAGE_GUARD' };
+  const refusals = [{ status: reading.status, resetsAt: reading.resetsAt }, ...Object.values(reading.windows || {})];
   for (const w of refusals) {
     if (/rejected/.test(String(w.status || '')) && w.resetsAt && now < w.resetsAt) return { reason: 'LIMIT_PAUSE', until: new Date(w.resetsAt).toISOString() };
   }
-  if (!reading) return canProbe ? { probe: true } : { fallback: true };
-  const wk = (reading.windows || {}).seven_day;
-  const live = wk && (!wk.resetsAt || now < wk.resetsAt); // a window that has reset no longer counts
-  // No live weekly number: below its warning level (the service sends none), or the week has reset. Work; the run
-  // itself brings a fresh reading.
-  if (!live) return null;
-  // Usage only grows until the reset, so an old reading already over the ceiling still holds (no probe needed).
-  const ceiling = weeklyCeilingAt(wk.resetsAt, now, cfg);
-  if (wk.utilization >= ceiling) return { reason: 'OWNER_RESERVE_WEEKLY', until: new Date(wk.resetsAt).toISOString(), ceiling };
-  if (!fresh && wk.utilization >= cfg.probeWhenStaleAbove) return canProbe ? { probe: true } : { fallback: true };
   return null;
-}
-
-/** Append a reading to the usage log (for the daily report: real subscription percentages, not costs). */
-export function recordReading(state, reading) {
-  if (!reading) return state;
-  const wk = (reading.windows || {}).seven_day; const fh = (reading.windows || {}).five_hour;
-  const row = { at: reading.observedAt, status: reading.status, weekly: wk ? wk.utilization : null, weeklyResetsAt: wk && wk.resetsAt ? new Date(wk.resetsAt).toISOString() : null,
-    fiveHour: fh ? fh.utilization : null, belowWarning: !!reading.belowWarning, extraUsage: reading.overageEnabled || reading.isUsingOverage };
-  return { ...state, limits: reading, usageLog: [...(state.usageLog || []), row].slice(-300) };
-}
-
-/** Real subscription usage on an Eastern date, from the readings: first, last and highest weekly %. */
-export function subscriptionSummary(state, date, cfg = WORKER_DEFAULTS) {
-  const rows = (state.usageLog || []).filter((r) => wallClock(new Date(r.at), cfg.timeZone).date === date);
-  const pct = (v) => (v == null ? null : Math.round(v * 100));
-  const wk = rows.filter((r) => r.weekly != null);
-  return {
-    readings: rows.length,
-    weeklyPercentFirst: wk.length ? pct(wk[0].weekly) : null,
-    weeklyPercentLast: wk.length ? pct(wk[wk.length - 1].weekly) : null,
-    weeklyPercentMax: wk.length ? pct(Math.max(...wk.map((r) => r.weekly))) : null,
-    weeklyResetsAt: wk.length ? wk[wk.length - 1].weeklyResetsAt : null,
-    belowWarningReadings: rows.filter((r) => r.belowWarning).length,
-    extraUsageSeen: rows.some((r) => r.extraUsage),
-    note: 'percent of the weekly subscription limit as reported by the service; null = below its warning level, no number sent',
-  };
 }
 
 // ---- Inactivity accounting (for the daily report) ----
@@ -244,9 +184,9 @@ export function runsToday(state, now, cfg = WORKER_DEFAULTS) {
  * state: { runs: [{ taskId, startedAt, endedAt?, outcome? }], attempts: { [taskId]: { count, lastAt } } }
  * running: true when a previous worker run is still alive (lock held).
  */
-export function decideRun({ now, openRows, state, running, paused, boardRows = null, freeMemoryMB = Infinity, canProbe = false, cfg = WORKER_DEFAULTS }) {
-  const gate = usageGate(state.limits, now, cfg, { canProbe }) || {};
-  if (gate.reason === 'OVERAGE_GUARD' || gate.reason === 'LIMIT_PAUSE') return { action: 'SKIP', ...gate };
+export function decideRun({ now, openRows, state, running, paused, boardRows = null, freeMemoryMB = Infinity, cfg = WORKER_DEFAULTS }) {
+  const gate = usageGate(state.limits, now);
+  if (gate) return { action: 'SKIP', ...gate };
   if (paused) return { action: 'SKIP', reason: 'PAUSED' };
   if (!inWakeWindow(now, cfg)) return { action: 'SKIP', reason: 'OUT_OF_WINDOW' };
   if (running) return { action: 'SKIP', reason: 'RUN_IN_PROGRESS' };
@@ -255,22 +195,15 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
   const tasks = all.filter((t) => !skipped.some(([id]) => id === t.id));
   if (all.length && !tasks.length) return { action: 'SKIP', reason: 'ALL_WAITING_ON_OTHERS', waiting: Object.fromEntries(skipped) };
   if (runsToday(state, now, cfg) >= cfg.fuseRunsPerDay) return { action: 'SKIP', reason: tasks.length ? 'FUSE' : 'NO_HARNESS_TASKS' };
-  if (gate.fallback && runsToday(state, now, cfg) >= cfg.fallbackRunsPerDay) return { action: 'SKIP', reason: 'USAGE_UNKNOWN_CAP' };
   const last = (state.runs || []).reduce((m, r) => Math.max(m, Date.parse(r.startedAt) || 0), 0);
   if (last && now - last < cfg.minGapMinutes * MIN) return { action: 'SKIP', reason: tasks.length ? 'MIN_GAP' : 'NO_HARNESS_TASKS' };
-  // Low-cost monitoring and the daily report: one short run per Eastern day after 08:00 ET, also while development is
-  // paused by the owner's reserve (owner: "Continue monitoring, communication and task discovery even when Claude
-  // development is paused"). Never while the subscription refuses or extra usage is on (handled above).
-  const todayWc = wallClock(now, cfg.timeZone);
-  const idleToday = (state.runs || []).some((r) => (r.taskId === 'IDLE' || r.taskId === 'REPORT') && wallClock(new Date(r.startedAt), cfg.timeZone).date === todayWc.date);
-  const dailySlot = cfg.idleCheckPerDay && !idleToday && todayWc.minutes >= 8 * 60;
   if (tasks.length === 0) {
-    if (dailySlot) return { action: 'RUN', taskId: 'IDLE', title: 'idle check', open: 0 };
+    // Low-cost monitoring: one idle check per Eastern day, never more, and only after 08:00 ET so it lands in the
+    // owner's day. Everything else about an empty queue is Muse's discovery job.
+    const today = wallClock(now, cfg.timeZone);
+    const idleToday = (state.runs || []).some((r) => r.taskId === 'IDLE' && wallClock(new Date(r.startedAt), cfg.timeZone).date === today.date);
+    if (cfg.idleCheckPerDay && !idleToday && today.minutes >= 8 * 60) return { action: 'RUN', taskId: 'IDLE', title: 'idle check', open: 0 };
     return { action: 'SKIP', reason: 'NO_HARNESS_TASKS' };
-  }
-  if (gate.reason === 'OWNER_RESERVE_WEEKLY') {
-    if (dailySlot) return { action: 'RUN', taskId: 'REPORT', title: 'daily report while paused', open: tasks.length };
-    return { action: 'SKIP', ...gate, open: tasks.length };
   }
   const attempts = state.attempts || {};
   // Fairness: never-attempted tasks first, then the one attempted longest ago (a busy old task must not starve a new one,
@@ -297,13 +230,12 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
   });
   if (!pick) return { action: 'SKIP', reason: 'ALL_ATTEMPTED_RECENTLY', open: tasks.length };
   if (freeMemoryMB < cfg.minFreeMemoryMB) return { action: 'SKIP', reason: 'LOW_MEMORY', freeMemoryMB: Math.round(freeMemoryMB) };
-  if (gate.probe) return { action: 'PROBE', taskId: pick.id };
   return { action: 'RUN', taskId: pick.id, title: String(pick.title || '').slice(0, 200), open: tasks.length };
 }
 
 /** Record a run start in state (pure: returns a new state). */
 export function recordStart(state, taskId, now) {
-  if (taskId === 'IDLE' || taskId === 'REPORT') return { ...state, runs: [...(state.runs || []), { taskId, startedAt: now.toISOString() }].slice(-200) };
+  if (taskId === 'IDLE') return { ...state, runs: [...(state.runs || []), { taskId, startedAt: now.toISOString() }].slice(-200) };
   const attempts = { ...(state.attempts || {}) };
   const prev = attempts[taskId] || { count: 0 };
   // (a run started because of new feedback still records lastAt, so the same feedback never triggers twice)
@@ -317,11 +249,6 @@ export function runPrompt(taskId) {
   if (taskId === 'IDLE') {
     return 'WORKER IDLE CHECK. No board task is open for you on crosswalk museclaudepilot. Follow the IDLE section of ' +
       'the worker instructions you were given (one short QUEUE EMPTY post at most), then end.';
-  }
-  if (taskId === 'REPORT') {
-    return 'WORKER REPORT RUN. Development is paused because the owner\'s weekly reserve is reached (resumes at the ' +
-      'weekly reset). Do ONLY the daily usage report from the worker instructions, plus one short fyi post for Muse ' +
-      'saying development is paused until the reset. Do not work on any task. Then end.';
   }
   if (!/^\w{2,20}$/.test(taskId)) throw new Error('bad task id');
   return `WORKER RUN. Your assigned board task id is ${taskId} on crosswalk museclaudepilot. ` +
