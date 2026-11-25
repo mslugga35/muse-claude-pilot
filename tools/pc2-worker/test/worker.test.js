@@ -213,3 +213,11 @@ test('an explicit RELEASED post ends a hold by another session', () => {
     post('[HARNESS] IN PROGRESS (interactive session) T-20261125-02', 'Pilot Harness (Claude Code PC2)')];
   assert.equal(boardSkip(t, rows, NOON), null);
 });
+
+test('fairness: a never-attempted task goes before an old task that keeps getting feedback', () => {
+  const old = task('a1', { title: 'T-20261124-99 old busy task' });
+  const fresh = task('d9', { title: 'T-20261125-03 DEPLOY', created_at: '2026-11-25T11:29:00Z' });
+  const s = recordStart(empty(), 'a1', T('2026-11-25T16:00:00Z'));
+  const review = post('REVIEW T-20261124-99: more notes', 'Muse', 'Today, Wed, Nov 25, 11:40am EST');
+  assert.equal(decideRun({ now: NOON, openRows: [old, fresh], state: s, boardRows: [review] }).taskId, 'd9');
+});

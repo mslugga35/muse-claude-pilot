@@ -119,7 +119,11 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
     return { action: 'SKIP', reason: 'NO_HARNESS_TASKS' };
   }
   const attempts = state.attempts || {};
-  const pick = tasks.find((t) => {
+  // Fairness: never-attempted tasks first, then the one attempted longest ago (a busy old task must not starve a new one,
+  // e.g. a DEPLOY task waiting behind a long review thread). Ties keep oldest-created first.
+  const lastAt = (t) => (attempts[t.id] ? Date.parse(attempts[t.id].lastAt) : -Infinity);
+  const ordered = [...tasks].sort((x, y) => lastAt(x) - lastAt(y));
+  const pick = ordered.find((t) => {
     const a = attempts[t.id];
     if (!a) return true;
     // New feedback (a review, revision or answer) since the last attempt makes the task workable now: that is progress,
