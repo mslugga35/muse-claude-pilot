@@ -254,3 +254,16 @@ test('after a run, the worker cleans up only the descendant processes of that ru
   assert.deepEqual(calls, [[4242, 'number']]);
   assert.match(fs.readFileSync(path.join(h, 'worker.log'), 'utf8'), /"CLEANUP".*"stopped":2/);
 });
+
+test('daily usage summary: runs, minutes, list-price total, per task, outcomes (no LLM)', async () => {
+  const { usageSummary } = await import('../lib.js');
+  const st = { runs: [
+    { taskId: 'a1', startedAt: '2026-11-25T13:00:00Z', seconds: 600, costUsd: 1.5, turns: 20, denials: 1, outcome: 'EXITED_OK' },
+    { taskId: 'a1', startedAt: '2026-11-25T15:00:00Z', seconds: 120, costUsd: 0.5, turns: 5, denials: 0, outcome: 'EXITED_OK' },
+    { taskId: 'b2', startedAt: '2026-11-26T03:00:00Z', seconds: 60, costUsd: 0.25, turns: 3, outcome: 'KILLED_TIMEOUT' }, // 22:00 ET Nov 25
+    { taskId: 'c3', startedAt: '2026-11-26T06:00:00Z', seconds: 60, costUsd: 9, turns: 3, outcome: 'EXITED_OK' } ] }; // Nov 26 ET
+  const u = usageSummary(st, '2026-11-25');
+  assert.deepEqual([u.runs, u.minutes, u.listPriceUsd, u.turns, u.permissionDenials], [3, 13, 2.25, 28, 1]);
+  assert.deepEqual(u.byTask, { a1: 2, b2: 1 });
+  assert.deepEqual(u.outcomes, { EXITED_OK: 2, KILLED_TIMEOUT: 1 });
+});

@@ -90,6 +90,20 @@ export function lastFeedbackAt(task, rows, now) {
   return null;
 }
 
+/** Per-day usage summary for the owner's daily report (no LLM): runs, minutes, list-price equivalent, outcomes. */
+export function usageSummary(state, date, cfg = WORKER_DEFAULTS) {
+  const runs = (state.runs || []).filter((r) => wallClock(new Date(r.startedAt), cfg.timeZone).date === date);
+  const sum = (k) => runs.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+  const byTask = {};
+  for (const r of runs) byTask[r.taskId] = (byTask[r.taskId] || 0) + 1;
+  return {
+    date, runs: runs.length, dailyCap: cfg.maxRunsPerDay, minutes: Math.round(sum('seconds') / 60),
+    listPriceUsd: Math.round(sum('costUsd') * 100) / 100, turns: sum('turns'), permissionDenials: sum('denials'),
+    byTask, outcomes: runs.reduce((a, r) => { a[r.outcome || 'RUNNING'] = (a[r.outcome || 'RUNNING'] || 0) + 1; return a; }, {}),
+    note: 'list-price equivalent as reported by Claude Code; billed against the owner subscription, not dollars',
+  };
+}
+
 /** Runs started on the same Eastern date as now. */
 export function runsToday(state, now, cfg = WORKER_DEFAULTS) {
   const today = wallClock(now, cfg.timeZone).date;

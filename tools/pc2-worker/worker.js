@@ -11,7 +11,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Crosswalk, acquireLock } from '../wake-poller/poller.js';
 import { DEFAULTS as POLLER } from '../wake-poller/lib.js';
-import { WORKER_DEFAULTS, decideRun, recordStart, runPrompt } from './lib.js';
+import { WORKER_DEFAULTS, decideRun, recordStart, runPrompt, usageSummary } from './lib.js';
+import { wallClock } from '../wake-poller/lib.js';
 
 export function workerHome() { return path.join(process.env.LOCALAPPDATA || '.', 'muse-ops-worker'); }
 
@@ -62,6 +63,7 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
       }
     }
     const state = loadState(home);
+    try { writeUsage(home, now, cfg); } catch { /* reporting must never block work */ }
     const d = decideRun({ now, openRows, state, running, paused, boardRows, freeMemoryMB: freeMemImpl() / 1048576, cfg });
     if (d.action !== 'RUN') { log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting, freeMemoryMB: d.freeMemoryMB }); return { outcome: d.reason }; }
     if (dryRun) { log(home, 'CHECK', { outcome: 'DRY_RUN_WOULD_RUN', taskId: d.taskId }); return { outcome: 'DRY_RUN_WOULD_RUN', taskId: d.taskId }; }
@@ -73,7 +75,7 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
     if (cleaned) log(home, 'CLEANUP', { taskId: d.taskId, stopped: cleaned });
     const s2 = loadState(home);
     const last = s2.runs[s2.runs.length - 1];
-    if (last && last.taskId === d.taskId) Object.assign(last, { endedAt: new Date().toISOString(), outcome: res.outcome, exitCode: res.code });
+    if (last && last.taskId === d.taskId) Object.assign(last, { endedAt: new Date().toISOString(), outcome: res.outcome, exitCode: res.code, seconds: res.seconds, ...runStats(res.outFile) });
     saveState(home, s2);
     log(home, 'RUN_END', { taskId: d.taskId, outcome: res.outcome, exitCode: res.code, seconds: res.seconds });
     return { outcome: res.outcome, taskId: d.taskId };
@@ -101,6 +103,24 @@ export function cleanupDescendants(rootPid, startedAtMs) {
   });
 }
 
+/** Turns, list-price cost and refusals from a run's JSON output (empty object if unreadable). */
+export function runStats(file) {
+  try {
+    const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return { turns: d.num_turns || 0, costUsd: d.total_cost_usd || 0, denials: (d.permission_denials || []).length };
+  } catch { return {}; }
+}
+
+/** Writes usage-summary.json (today and yesterday, Eastern) so the daily report has real numbers. No LLM. */
+export function writeUsage(home, now = new Date(), cfg = WORKER_DEFAULTS) {
+  const state = loadState(home);
+  const today = wallClock(now, cfg.timeZone).date;
+  const yesterday = wallClock(new Date(+now - 24 * 3600 * 1000), cfg.timeZone).date;
+  const out = { generatedAt: now.toISOString(), today: usageSummary(state, today, cfg), yesterday: usageSummary(state, yesterday, cfg) };
+  fs.writeFileSync(path.join(home, 'usage-summary.json'), JSON.stringify(out, null, 2));
+  return out;
+}
+
 export function claudeExe(cfg) {
   if (cfg.claudePath) return cfg.claudePath;
   const exe = path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
@@ -113,7 +133,8 @@ function runClaude({ home, cfg, taskId, spawnImpl }) {
   const args = ['-p', runPrompt(taskId), '--append-system-prompt-file', promptFile, '--permission-mode', 'auto',
     '--max-budget-usd', String(cfg.maxBudgetUsd), '--output-format', 'json'];
   const started = Date.now();
-  const out = fs.openSync(path.join(home, 'runs', `${new Date(started).toISOString().replace(/[:.]/g, '-')}-${taskId}.json`), 'w');
+  const outFile = path.join(home, 'runs', `${new Date(started).toISOString().replace(/[:.]/g, '-')}-${taskId}.json`);
+  const out = fs.openSync(outFile, 'w');
   return new Promise((resolve) => {
     // shell: false and the real executable, so the prompt argument can never be re-parsed by a shell.
     // The read-only board key is for the pre-check only: never inherited by the headless run.
@@ -123,7 +144,7 @@ function runClaude({ home, cfg, taskId, spawnImpl }) {
     const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } }, cfg.runTimeoutMinutes * 60 * 1000);
     child.on('exit', (code, signal) => {
       clearTimeout(timer); fs.closeSync(out);
-      resolve({ outcome: signal ? 'KILLED_TIMEOUT' : code === 0 ? 'EXITED_OK' : 'EXITED_ERROR', code, seconds: Math.round((Date.now() - started) / 1000), pid: child.pid, startedAt: started });
+      resolve({ outcome: signal ? 'KILLED_TIMEOUT' : code === 0 ? 'EXITED_OK' : 'EXITED_ERROR', code, seconds: Math.round((Date.now() - started) / 1000), pid: child.pid, startedAt: started, outFile });
     });
     child.on('error', () => { clearTimeout(timer); try { fs.closeSync(out); } catch { /* closed */ } resolve({ outcome: 'SPAWN_FAILED', code: null, seconds: 0 }); });
   });
