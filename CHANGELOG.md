@@ -5,6 +5,9 @@
 - Worker: ≤6 runs/day, one idle QUEUE EMPTY check per day when nothing is open.
 - Engineer routine FAILOVER rule: takes stalled pilot-repo harness tasks when PC2 is down.
 - docs/engineering-notes/T-20261125-02.md: failure map, failover options, owner decisions.
+- Worker free board pre-check (no LLM run when a task awaits review / is held / the cloud engineer has it); trusts
+  only Crosswalk numbers + the owner account; RELEASED ends a hold; new feedback triggers an immediate run.
+- `test/line-endings.test.js` (CRLF / control-character guard), `docs/lessons.md`, `docs/owner-communication-rule.md`.
 
 ## 2026-11-25 — T-20261125-01: permanent operation
 - No end date anywhere: engineer and verifier routine crons, poller `pilotEnd` (now `null`), scheduler EndBoundary.
