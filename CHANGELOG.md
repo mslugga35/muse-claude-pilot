@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-25 — T-20261125-04: worker scheduling and memory hygiene (PR #11)
+- Priority lanes (DEPLOY → this repo → other projects), fair order, max 2 runs per task per day, 45-min run limit.
+- Skip runs below 1.5 GB free memory; stop the run's own leftover processes after each run.
+- Daily cap unchanged at 6 (owner).
+
+## 2026-11-25 — T-20261125-03: PR #10 merged (e521e60), poller + worker reinstalled from main, verified
+
 ## 2026-11-25 — T-20261125-02 + OPERATING MODEL v2: continuous operation
 - All-day defaults: poller and PC2 worker windows 00:00–23:59 ET; engineer routine hourly 24/7.
 - Worker: ≤6 runs/day, one idle QUEUE EMPTY check per day when nothing is open.
