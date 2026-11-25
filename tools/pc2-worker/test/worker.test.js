@@ -26,10 +26,27 @@ test('tasks from other board members, or other agents of the account, are never 
 
 test('skips: paused, outside 08:05-22:05 ET, run in progress, nothing open', () => {
   assert.equal(decideRun({ now: NOON, openRows: [task('a1')], state: empty(), paused: true }).reason, 'PAUSED');
-  assert.equal(decideRun({ now: T('2026-11-25T12:00:00Z'), openRows: [task('a1')], state: empty() }).reason, 'OUT_OF_WINDOW');
-  assert.equal(decideRun({ now: T('2026-11-26T03:10:00Z'), openRows: [task('a1')], state: empty() }).reason, 'OUT_OF_WINDOW');
+  // 24h by default (owner 2026-11-25): 03:00 ET and 22:10 ET both run
+  assert.equal(decideRun({ now: T('2026-11-25T08:00:00Z'), openRows: [task('a1')], state: empty() }).action, 'RUN');
+  assert.equal(decideRun({ now: T('2026-11-26T03:10:00Z'), openRows: [task('a1')], state: empty() }).action, 'RUN');
+  const narrow = { ...D, windowStart: '08:05', windowEnd: '22:05' };
+  assert.equal(decideRun({ now: T('2026-11-25T12:00:00Z'), openRows: [task('a1')], state: empty(), cfg: narrow }).reason, 'OUT_OF_WINDOW');
   assert.equal(decideRun({ now: NOON, openRows: [task('a1')], state: empty(), running: true }).reason, 'RUN_IN_PROGRESS');
-  assert.equal(decideRun({ now: NOON, openRows: [task('c3', { for: 'Muse' })], state: empty() }).reason, 'NO_HARNESS_TASKS');
+  assert.equal(decideRun({ now: NOON, openRows: [task('a1')], state: empty(), running: true }).reason, 'RUN_IN_PROGRESS');
+});
+
+test('empty queue: one idle check per Eastern day after 08:00 ET, never more', () => {
+  let s = empty();
+  const none = [task('c3', { for: 'Muse' })];
+  assert.equal(decideRun({ now: T('2026-11-25T11:00:00Z'), openRows: none, state: s }).reason, 'NO_HARNESS_TASKS'); // 06:00 ET
+  const d = decideRun({ now: NOON, openRows: none, state: s });
+  assert.deepEqual([d.action, d.taskId], ['RUN', 'IDLE']);
+  s = recordStart(s, 'IDLE', NOON);
+  assert.deepEqual(s.attempts, {}, 'idle runs never count as task attempts');
+  assert.equal(decideRun({ now: new Date(+NOON + 3 * 3600000), openRows: none, state: s }).reason, 'NO_HARNESS_TASKS');
+  assert.equal(decideRun({ now: T('2026-11-26T14:00:00Z'), openRows: none, state: s }).taskId, 'IDLE'); // next day
+  assert.equal(decideRun({ now: NOON, openRows: none, state: empty(), cfg: { ...D, idleCheckPerDay: false } }).reason, 'NO_HARNESS_TASKS');
+  assert.match(runPrompt('IDLE'), /IDLE CHECK/);
 });
 
 test('runs the oldest task, then respects the gap, the retry delay and the per-task cap', () => {

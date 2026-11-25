@@ -4,14 +4,16 @@ import { inWakeWindow, wallClock } from '../wake-poller/lib.js';
 
 export const WORKER_DEFAULTS = Object.freeze({
   timeZone: 'America/New_York',
-  windowStart: '08:05',
-  windowEnd: '22:05',
+  // Continuous operation (owner 2026-11-25, OPERATING MODEL v2): all day, every day. Spend is bounded by the caps below.
+  windowStart: '00:00',
+  windowEnd: '23:59',
   harnessNames: ['pilot harness (claude code pc2)', 'claude', 'claude code', 'pilot harness'],
   // Only tasks created from the owner's own account count (Crosswalk marks them by: 'you'; Muse and the owner both post
   // from it). A task added by any other board member is never worked, whatever it is addressed to.
   trustedBy: ['you'],
   trustedVia: ['muse', 'owner', 'mpmmorales', ''],
-  maxRunsPerDay: 6, // runs started per Eastern calendar day
+  maxRunsPerDay: 10, // runs started per Eastern calendar day (task runs + the idle check)
+  idleCheckPerDay: true, // with no open harness task: at most ONE short run per day (QUEUE EMPTY + next known item)
   minGapMinutes: 20, // between run starts
   retryAfterHours: 6, // a task the worker already attempted is not attempted again for this long
   maxAttemptsPerTask: 3, // then it is left for Muse/owner with the evidence already on the board
@@ -47,10 +49,17 @@ export function decideRun({ now, openRows, state, running, paused, cfg = WORKER_
   if (!inWakeWindow(now, cfg)) return { action: 'SKIP', reason: 'OUT_OF_WINDOW' };
   if (running) return { action: 'SKIP', reason: 'RUN_IN_PROGRESS' };
   const tasks = harnessTasks(openRows, cfg);
-  if (tasks.length === 0) return { action: 'SKIP', reason: 'NO_HARNESS_TASKS' };
-  if (runsToday(state, now, cfg) >= cfg.maxRunsPerDay) return { action: 'SKIP', reason: 'DAILY_CAP' };
+  if (runsToday(state, now, cfg) >= cfg.maxRunsPerDay) return { action: 'SKIP', reason: tasks.length ? 'DAILY_CAP' : 'NO_HARNESS_TASKS' };
   const last = (state.runs || []).reduce((m, r) => Math.max(m, Date.parse(r.startedAt) || 0), 0);
-  if (last && now - last < cfg.minGapMinutes * MIN) return { action: 'SKIP', reason: 'MIN_GAP' };
+  if (last && now - last < cfg.minGapMinutes * MIN) return { action: 'SKIP', reason: tasks.length ? 'MIN_GAP' : 'NO_HARNESS_TASKS' };
+  if (tasks.length === 0) {
+    // Low-cost monitoring: one idle check per Eastern day, never more, and only after 08:00 ET so it lands in the
+    // owner's day. Everything else about an empty queue is Muse's discovery job.
+    const today = wallClock(now, cfg.timeZone);
+    const idleToday = (state.runs || []).some((r) => r.taskId === 'IDLE' && wallClock(new Date(r.startedAt), cfg.timeZone).date === today.date);
+    if (cfg.idleCheckPerDay && !idleToday && today.minutes >= 8 * 60) return { action: 'RUN', taskId: 'IDLE', title: 'idle check', open: 0 };
+    return { action: 'SKIP', reason: 'NO_HARNESS_TASKS' };
+  }
   const attempts = state.attempts || {};
   const pick = tasks.find((t) => {
     const a = attempts[t.id];
@@ -64,6 +73,7 @@ export function decideRun({ now, openRows, state, running, paused, cfg = WORKER_
 
 /** Record a run start in state (pure: returns a new state). */
 export function recordStart(state, taskId, now) {
+  if (taskId === 'IDLE') return { ...state, runs: [...(state.runs || []), { taskId, startedAt: now.toISOString() }].slice(-200) };
   const attempts = { ...(state.attempts || {}) };
   const prev = attempts[taskId] || { count: 0 };
   attempts[taskId] = { count: prev.count + 1, lastAt: now.toISOString() };
@@ -73,6 +83,10 @@ export function recordStart(state, taskId, now) {
 
 /** The only text the headless run is given about the task: ids only, never board content. */
 export function runPrompt(taskId) {
+  if (taskId === 'IDLE') {
+    return 'WORKER IDLE CHECK. No board task is open for you on crosswalk museclaudepilot. Follow the IDLE section of ' +
+      'the worker instructions you were given (one short QUEUE EMPTY post at most), then end.';
+  }
   if (!/^\w{2,20}$/.test(taskId)) throw new Error('bad task id');
   return `WORKER RUN. Your assigned board task id is ${taskId} on crosswalk museclaudepilot. ` +
     'Follow the worker instructions you were given. Work on this one task only, then end.';

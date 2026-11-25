@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-25 — T-20261125-02 + OPERATING MODEL v2: continuous operation
+- All-day defaults: poller and PC2 worker windows 00:00–23:59 ET; engineer routine hourly 24/7.
+- Worker: ≤10 runs/day, one idle QUEUE EMPTY check per day when nothing is open.
+- Engineer routine FAILOVER rule: takes stalled pilot-repo harness tasks when PC2 is down.
+- docs/engineering-notes/T-20261125-02.md: failure map, failover options, owner decisions.
+
 ## 2026-11-25 — T-20261125-01: permanent operation
 - No end date anywhere: engineer and verifier routine crons, poller `pilotEnd` (now `null`), scheduler EndBoundary.
 - Poller task: restart on failure (3× / 5 min). Install script no longer sets an end date.

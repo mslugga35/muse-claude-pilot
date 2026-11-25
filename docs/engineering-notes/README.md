@@ -12,3 +12,4 @@ Before starting a task: read `docs/known-issues.md`, the runbooks, and the notes
 | Task | Date | Summary |
 |---|---|---|
 | [T-20261125-01](T-20261125-01.md) | 2026-11-25 | Permanent operation: no Nov 27 end, recovery settings, stalled-task root cause |
+| [T-20261125-02](T-20261125-02.md) | 2026-11-25 | PC2 single point of failure: map, failure cases, failover options, $0 fixes |
