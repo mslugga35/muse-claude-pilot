@@ -69,9 +69,21 @@ export function boardSkip(task, rows, now) {
   if (newerFromOthers) return null; // Muse (or the owner) answered: there is new work
   const brief = String(h.brief || '');
   if (/READY FOR REVIEW|BLOCKED|RESULT|\bDONE\b/.test(brief)) return 'AWAITING_REVIEW';
+  if (/RELEASED/.test(brief)) return null; // another session handed the task back explicitly
   if (/IN PROGRESS|RECEIVED/.test(brief)) {
     const at = parseWhen(String(h.when || '').replace(/^(Today|Yesterday), /, ''), now);
     if (!at || now - at < 2 * 3600 * 1000) return 'IN_PROGRESS_ELSEWHERE';
+  }
+  return null;
+}
+
+/** Latest time anyone other than the harness posted about the task (owner account only), or null. */
+export function lastFeedbackAt(task, rows, now) {
+  const keys = taskKeys(task);
+  for (const r of rows || []) { // newest first
+    if (!fromOwnerAccount(r) || isHarness(r) || !mentions(r, keys)) continue;
+    const at = parseWhen(String(r.when || '').replace(/^(Today|Yesterday), /, ''), now);
+    if (at) return at;
   }
   return null;
 }
@@ -110,6 +122,10 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
   const pick = tasks.find((t) => {
     const a = attempts[t.id];
     if (!a) return true;
+    // New feedback (a review, revision or answer) since the last attempt makes the task workable now: that is progress,
+    // not a retry, so it neither waits for retryAfterHours nor counts toward maxAttemptsPerTask.
+    const fb = boardRows ? lastFeedbackAt(t, boardRows, now) : null;
+    if (fb && fb > Date.parse(a.lastAt)) return true;
     if (a.count >= cfg.maxAttemptsPerTask) return false;
     return now - Date.parse(a.lastAt) >= cfg.retryAfterHours * 60 * MIN;
   });
@@ -122,6 +138,7 @@ export function recordStart(state, taskId, now) {
   if (taskId === 'IDLE') return { ...state, runs: [...(state.runs || []), { taskId, startedAt: now.toISOString() }].slice(-200) };
   const attempts = { ...(state.attempts || {}) };
   const prev = attempts[taskId] || { count: 0 };
+  // (a run started because of new feedback still records lastAt, so the same feedback never triggers twice)
   attempts[taskId] = { count: prev.count + 1, lastAt: now.toISOString() };
   const runs = [...(state.runs || []), { taskId, startedAt: now.toISOString() }].slice(-200);
   return { ...state, runs, attempts };

@@ -196,3 +196,20 @@ test('board check trusts Crosswalk numbers and the owner account, not names or b
   assert.equal(boardSkip(t, [post('[HARNESS] READY FOR REVIEW T-20261125-021', 'Pilot Harness (Claude Code PC2)')], NOON), null);
   assert.equal(boardSkip(t, [post('[HARNESS] BLOCKED xjvhe06', 'Pilot Harness (Claude Code PC2)')], NOON), null);
 });
+
+test('new feedback since the last attempt makes a task workable at once; the same feedback never triggers twice', () => {
+  const t = task('a1', { title: 'T-20261125-77 thing' });
+  let s = recordStart(empty(), 'a1', T('2026-11-25T15:00:00Z')); // attempted 10:00 ET
+  const review = post('REVIEW T-20261125-77: NEEDS CHANGES', 'Muse', 'Today, Wed, Nov 25, 11:30am EST');
+  const d = decideRun({ now: NOON, openRows: [t], state: s, boardRows: [review] });
+  assert.equal(d.taskId, 'a1', 'review at 11:30 is newer than the 10:00 attempt');
+  s = recordStart(s, 'a1', NOON);
+  assert.equal(decideRun({ now: new Date(+NOON + 30 * 60000), openRows: [t], state: s, boardRows: [review] }).reason, 'ALL_ATTEMPTED_RECENTLY');
+});
+
+test('an explicit RELEASED post ends a hold by another session', () => {
+  const t = task('jvhe06', { title: 'T-20261125-02: failover' });
+  const rows = [post('[HARNESS] RELEASED T-20261125-02 to the PC2 worker', 'Pilot Harness (Claude Code PC2)'),
+    post('[HARNESS] IN PROGRESS (interactive session) T-20261125-02', 'Pilot Harness (Claude Code PC2)')];
+  assert.equal(boardSkip(t, rows, NOON), null);
+});
