@@ -9,7 +9,7 @@ import { checkOnce } from '../worker.js';
 
 const T = (s) => new Date(s);
 const NOON = T('2026-11-25T17:00:00Z'); // 12:00 ET
-const task = (id, extra = {}) => ({ id, status: 'open', for: 'Pilot Harness (Claude Code PC2)', title: `t ${id}`,
+const task = (id, extra = {}) => ({ id, status: 'open', by: 'you', via: 'Muse', for: 'Pilot Harness (Claude Code PC2)', title: `t ${id}`,
   created_at: '2026-11-24T10:00:00Z', ...extra });
 const empty = () => ({ runs: [], attempts: {} });
 
@@ -17,6 +17,11 @@ test('only open tasks for the harness count, oldest first; ids validated', () =>
   const rows = [task('b2', { created_at: '2026-11-25T01:00:00Z' }), task('a1'), task('c3', { for: 'Muse' }),
     task('d4', { status: 'done' }), task('bad id!'), task('e5', { for: 'claude', created_at: '2026-11-24T11:00:00Z' })];
   assert.deepEqual(harnessTasks(rows).map((t) => t.id), ['a1', 'e5', 'b2']);
+});
+
+test('tasks from other board members, or other agents of the account, are never worked', () => {
+  const rows = [task('a1', { by: 'stranger' }), task('b2', { via: 'Some Bot' }), task('c3', { by: undefined }), task('d4')];
+  assert.deepEqual(harnessTasks(rows).map((t) => t.id), ['d4']);
 });
 
 test('skips: paused, outside 08:05-22:05 ET, run in progress, nothing open', () => {
@@ -69,6 +74,7 @@ function fakeSpawn(code = 0) {
   return { impl, calls };
 }
 const env = { CROSSWALK_POLLER_KEY: 'k' };
+process.env.CROSSWALK_POLLER_KEY = 'k-from-parent'; // as run-worker.ps1 sets it
 
 test('checkOnce: one run, recorded before start, auto permission mode, budget cap, no shell, lock released', async () => {
   const h = home(); fs.writeFileSync(path.join(h, 'worker-prompt.md'), 'x');
@@ -81,6 +87,7 @@ test('checkOnce: one run, recorded before start, auto permission mode, budget ca
   assert.ok(!a.includes('bypassPermissions') && !a.includes('--dangerously-skip-permissions'));
   assert.equal(a[a.indexOf('--max-budget-usd') + 1], String(D.maxBudgetUsd));
   assert.equal(sp.calls[0].opts.shell, false);
+  assert.equal(sp.calls[0].opts.env.CROSSWALK_POLLER_KEY, undefined, 'board key not inherited');
   const s = JSON.parse(fs.readFileSync(path.join(h, 'state.json'), 'utf8'));
   assert.equal(s.attempts.a1.count, 1);
   assert.equal(s.runs[0].outcome, 'EXITED_OK');

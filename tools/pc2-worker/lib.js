@@ -7,6 +7,10 @@ export const WORKER_DEFAULTS = Object.freeze({
   windowStart: '08:05',
   windowEnd: '22:05',
   harnessNames: ['pilot harness (claude code pc2)', 'claude', 'claude code', 'pilot harness'],
+  // Only tasks created from the owner's own account count (Crosswalk marks them by: 'you'; Muse and the owner both post
+  // from it). A task added by any other board member is never worked, whatever it is addressed to.
+  trustedBy: ['you'],
+  trustedVia: ['muse', 'owner', 'mpmmorales', ''],
   maxRunsPerDay: 6, // runs started per Eastern calendar day
   minGapMinutes: 20, // between run starts
   retryAfterHours: 6, // a task the worker already attempted is not attempted again for this long
@@ -22,6 +26,8 @@ export function harnessTasks(openRows, cfg = WORKER_DEFAULTS) {
   return (openRows || [])
     .filter((t) => t && t.status === 'open' && typeof t.id === 'string' && /^\w{2,20}$/.test(t.id))
     .filter((t) => cfg.harnessNames.includes(String(t.for || '').trim().toLowerCase()))
+    .filter((t) => cfg.trustedBy.includes(String(t.by || '').trim().toLowerCase()))
+    .filter((t) => cfg.trustedVia.includes(String(t.via || '').trim().toLowerCase()))
     .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
 }
 

@@ -31,7 +31,7 @@ function saveState(home, s) {
 function loadCfg(home) {
   let over = {};
   try { over = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')); } catch { /* defaults */ }
-  for (const k of Object.keys(over)) if (/key|token|secret|password|harnessNames/i.test(k)) throw new Error(`config.json may not set ${k}`);
+  for (const k of Object.keys(over)) if (/key|token|secret|password|harnessNames|trusted/i.test(k)) throw new Error(`config.json may not set ${k}`);
   return { ...WORKER_DEFAULTS, ...over };
 }
 
@@ -90,7 +90,10 @@ function runClaude({ home, cfg, taskId, spawnImpl }) {
   const out = fs.openSync(path.join(home, 'runs', `${new Date(started).toISOString().replace(/[:.]/g, '-')}-${taskId}.json`), 'w');
   return new Promise((resolve) => {
     // shell: false and the real executable, so the prompt argument can never be re-parsed by a shell.
-    const child = spawnImpl(claudeExe(cfg), args, { cwd: cfg.workDir || process.env.USERPROFILE, stdio: ['ignore', out, out], windowsHide: true, shell: false });
+    // The read-only board key is for the pre-check only: never inherited by the headless run.
+    const env = { ...process.env };
+    for (const k of Object.keys(env)) if (/CROSSWALK_POLLER_KEY|ROUTINE_FIRE_TOKEN/i.test(k)) delete env[k];
+    const child = spawnImpl(claudeExe(cfg), args, { cwd: cfg.workDir || process.env.USERPROFILE, env, stdio: ['ignore', out, out], windowsHide: true, shell: false });
     const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } }, cfg.runTimeoutMinutes * 60 * 1000);
     child.on('exit', (code, signal) => {
       clearTimeout(timer); fs.closeSync(out);
