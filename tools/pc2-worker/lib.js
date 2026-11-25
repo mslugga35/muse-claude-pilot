@@ -12,7 +12,7 @@ export const WORKER_DEFAULTS = Object.freeze({
   // from it). A task added by any other board member is never worked, whatever it is addressed to.
   trustedBy: ['you'],
   trustedVia: ['muse', 'owner', 'mpmmorales', ''],
-  maxRunsPerDay: 10, // runs started per Eastern calendar day (task runs + the idle check)
+  maxRunsPerDay: 6, // runs started per Eastern calendar day (task runs + the idle check); task-spec value (T-20261125-01)
   idleCheckPerDay: true, // with no open harness task: at most ONE short run per day (QUEUE EMPTY + next known item)
   minGapMinutes: 20, // between run starts
   retryAfterHours: 6, // a task the worker already attempted is not attempted again for this long
