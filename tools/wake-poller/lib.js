@@ -26,7 +26,7 @@ export const DEFAULTS = Object.freeze({
   // Permanent operation since 2026-11-25 (T-20261125-01): no end date. Set pilotEnd to an Eastern date (YYYY-MM-DD)
   // in config.json to make the poller stop waking after that day.
   pilotEnd: null,
-  hourlyCron: '5 * * * *', // the existing routine's schedule (UTC); used only to avoid collisions
+  hourlyCron: '5 * * * *', // the routine's schedule (UTC), used only to avoid collisions; PC2 config.json sets the live value
   deferBeforeMin: 5, // hourly run starts within this many minutes -> defer, recheck next poll
   deferAfterMin: 7, // ...and keep deferring until the hourly run has had this long to ACK
   maxWakesPerHour: 3, // successful + uncertain wake attempts in any rolling 60 minutes

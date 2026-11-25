@@ -142,3 +142,43 @@ test('checkOnce: a timeout kill is reported, not retried at once', async () => {
   assert.equal((await checkOnce({ home: h, now: NOON, env, spawnImpl: impl, readTasks: async () => [task('a1')] })).outcome, 'KILLED_TIMEOUT');
   assert.equal((await checkOnce({ home: h, now: new Date(+NOON + 30 * 60000), env, spawnImpl: impl, readTasks: async () => [task('a1')] })).outcome, 'ALL_ATTEMPTED_RECENTLY');
 });
+
+// ---------- free board pre-check (no LLM run for tasks waiting on someone else) ----------
+import { boardSkip, taskKeys } from '../lib.js';
+const post = (brief, via, when = 'Today, Wed, Nov 25, 11:50am EST') => ({ brief, via, when });
+
+test('task keys: id plus the TASK_ID from the title or details', () => {
+  assert.deepEqual(taskKeys(task('pya3ps', { title: 'T-20261125-01 PRIORITY: remove expirations' })), ['pya3ps', 'T-20261125-01']);
+  assert.deepEqual(taskKeys(task('vc8a2c', { title: 'PeptideFacts preview' })), ['vc8a2c']);
+});
+
+test('awaiting review: our READY FOR REVIEW / BLOCKED is the latest word, so no run', () => {
+  const t = task('vc8a2c', { title: 'PeptideFacts preview' });
+  const rows = [post('[HARNESS] BLOCKED vc8a2c — 4 of 5 done', 'Pilot Harness (Claude Code PC2)'),
+    post('[HARNESS] RECEIVED vc8a2c', 'Pilot Harness (Claude Code PC2)')];
+  assert.equal(boardSkip(t, rows, NOON), 'AWAITING_REVIEW');
+  // Muse answers -> new work -> run
+  assert.equal(boardSkip(t, [post('REVIEW vc8a2c: NEEDS CHANGES', 'Muse'), ...rows], NOON), null);
+});
+
+test('in progress elsewhere for under 2 h, then free again; cloud failover ACK always skips', () => {
+  const t = task('jvhe06', { title: 'T-20261125-02: failover' });
+  const ip = [post('[HARNESS] IN PROGRESS (interactive session) T-20261125-02 failover', 'Pilot Harness (Claude Code PC2)', 'Today, Wed, Nov 25, 11:30am EST')];
+  assert.equal(boardSkip(t, ip, NOON), 'IN_PROGRESS_ELSEWHERE'); // 30 min old
+  assert.equal(boardSkip(t, ip, new Date(+NOON + 3 * 3600000)), null); // 3.5 h old: stale claim, take it
+  assert.equal(boardSkip(t, [post('[CC] ACK T-20261125-02/rev0 — failover from PC2 worker', 'CC Engineer (Claude routine)')], NOON), 'CC_HAS_IT');
+  assert.equal(boardSkip(t, [], NOON), null);
+});
+
+test('decideRun uses the board check: waiting tasks are passed over without an LLM run', async () => {
+  const rows = [post('[HARNESS] BLOCKED a1 — waiting', 'Pilot Harness (Claude Code PC2)')];
+  const d = decideRun({ now: NOON, openRows: [task('a1')], state: empty(), boardRows: rows });
+  assert.equal(d.reason, 'ALL_WAITING_ON_OTHERS');
+  assert.deepEqual(d.waiting, { a1: 'AWAITING_REVIEW' });
+  const d2 = decideRun({ now: NOON, openRows: [task('a1'), task('b2', { created_at: '2026-11-25T01:00:00Z' })], state: empty(), boardRows: rows });
+  assert.equal(d2.taskId, 'b2');
+  const h = home(); fs.writeFileSync(path.join(h, 'worker-prompt.md'), 'x'); const sp = fakeSpawn(0);
+  const r = await checkOnce({ home: h, now: NOON, env, spawnImpl: sp.impl, readTasks: async () => ({ open: [task('a1')], rows }) });
+  assert.equal(r.outcome, 'ALL_WAITING_ON_OTHERS');
+  assert.equal(sp.calls.length, 0, 'no LLM run');
+});

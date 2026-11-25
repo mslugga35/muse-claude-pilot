@@ -39,7 +39,10 @@ export async function readOpenTasks({ key, fetchImpl = fetch }) {
   const cw = new Crosswalk({ url: POLLER.crosswalkUrl, key, agent: POLLER.pollerAgent, fetchImpl });
   await cw.connect();
   const out = JSON.parse(await cw.call('read', { action: 'all', crosswalk: `${POLLER.crosswalk}/tasks`, peek: true, scope: 'agent', budget_tokens: 12000 }));
-  return out.open || [];
+  const open = out.open || [];
+  // Posts are read only when a harness task is open, so an empty queue costs one small read and no LLM call.
+  const rows = open.length ? await cw.boardRows(POLLER.crosswalk, 3) : [];
+  return { open, rows };
 }
 
 export async function checkOnce({ home = workerHome(), now = new Date(), env = process.env, fetchImpl = fetch, spawnImpl = spawn, readTasks = readOpenTasks, dryRun = false } = {}) {
@@ -49,17 +52,17 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
   // Lock held for the whole run (stale after the run timeout + 10 min), so two runs can never overlap.
   const lock = acquireLock(home, now, (cfg.runTimeoutMinutes + 10) * 60 * 1000);
   const running = !lock;
-  let openRows = [];
+  let openRows = []; let boardRows = null;
   try {
     if (!paused && !running) {
       if (!env.CROSSWALK_POLLER_KEY) { log(home, 'CHECK', { outcome: 'CONFIG_ERROR', reason: 'key missing from environment' }); return { outcome: 'CONFIG_ERROR' }; }
-      try { openRows = await readTasks({ key: env.CROSSWALK_POLLER_KEY, fetchImpl }); } catch (e) {
+      try { const r = await readTasks({ key: env.CROSSWALK_POLLER_KEY, fetchImpl }); if (Array.isArray(r)) openRows = r; else { openRows = r.open; boardRows = r.rows; } } catch (e) {
         log(home, 'CHECK', { outcome: 'BOARD_READ_FAILED', error: String(e.message).slice(0, 120) }); return { outcome: 'BOARD_READ_FAILED' };
       }
     }
     const state = loadState(home);
-    const d = decideRun({ now, openRows, state, running, paused, cfg });
-    if (d.action !== 'RUN') { log(home, 'CHECK', { outcome: d.reason, open: d.open }); return { outcome: d.reason }; }
+    const d = decideRun({ now, openRows, state, running, paused, boardRows, cfg });
+    if (d.action !== 'RUN') { log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting }); return { outcome: d.reason }; }
     if (dryRun) { log(home, 'CHECK', { outcome: 'DRY_RUN_WOULD_RUN', taskId: d.taskId }); return { outcome: 'DRY_RUN_WOULD_RUN', taskId: d.taskId }; }
     saveState(home, recordStart(state, d.taskId, now)); // recorded BEFORE starting: a crash never causes a rapid re-run
     log(home, 'RUN_START', { taskId: d.taskId, title: d.title });

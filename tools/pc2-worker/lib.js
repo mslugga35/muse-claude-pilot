@@ -1,6 +1,6 @@
 // PC2 worker: pure decision logic (no I/O), so every rule is unit-tested.
 // The worker starts ONE headless Claude Code run for ONE open board task assigned to the harness, under hard caps.
-import { inWakeWindow, wallClock } from '../wake-poller/lib.js';
+import { inWakeWindow, wallClock, parseWhen } from '../wake-poller/lib.js';
 
 export const WORKER_DEFAULTS = Object.freeze({
   timeZone: 'America/New_York',
@@ -33,6 +33,42 @@ export function harnessTasks(openRows, cfg = WORKER_DEFAULTS) {
     .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
 }
 
+/** Task id plus any TASK_ID (T-YYYYMMDD-NN) in its title or details: the strings posts use to refer to it. */
+export function taskKeys(task) {
+  const keys = new Set([task.id]);
+  for (const m of `${task.title || ''} ${task.details || ''}`.matchAll(/T-\d{8}-\d{2}/g)) { keys.add(m[0]); break; }
+  return [...keys];
+}
+
+const isHarness = (r) => /^\[HARNESS\]/.test(String(r.brief || '')) || /pilot harness/i.test(String(r.via || ''));
+const isCcAck = (r) => /^\[CC\] ACK\b/.test(String(r.brief || ''));
+
+/**
+ * Free board check BEFORE any LLM run (rows = museclaudepilot posts, newest first, as the board returns them).
+ * Returns a skip reason, or null when the task really needs a run.
+ *  - CC_HAS_IT: the cloud engineer ACKed it (failover).
+ *  - IN_PROGRESS_ELSEWHERE: the latest harness post is IN PROGRESS / RECEIVED and under 2 h old (another session has it).
+ *  - AWAITING_REVIEW: the latest harness post is READY FOR REVIEW / BLOCKED / RESULT / DONE and nobody else has posted
+ *    about the task since (no review, revision or answer yet).
+ */
+export function boardSkip(task, rows, now) {
+  const keys = taskKeys(task);
+  const related = (rows || []).filter((r) => keys.some((k) => String(r.brief || '').includes(k)));
+  if (related.some(isCcAck)) return 'CC_HAS_IT';
+  const iHarness = related.findIndex(isHarness);
+  if (iHarness === -1) return null;
+  const h = related[iHarness];
+  const newerFromOthers = related.slice(0, iHarness).some((r) => !isHarness(r));
+  if (newerFromOthers) return null; // Muse (or the owner) answered: there is new work
+  const brief = String(h.brief || '');
+  if (/READY FOR REVIEW|BLOCKED|RESULT|\bDONE\b/.test(brief)) return 'AWAITING_REVIEW';
+  if (/IN PROGRESS|RECEIVED/.test(brief)) {
+    const at = parseWhen(String(h.when || '').replace(/^(Today|Yesterday), /, ''), now);
+    if (!at || now - at < 2 * 3600 * 1000) return 'IN_PROGRESS_ELSEWHERE';
+  }
+  return null;
+}
+
 /** Runs started on the same Eastern date as now. */
 export function runsToday(state, now, cfg = WORKER_DEFAULTS) {
   const today = wallClock(now, cfg.timeZone).date;
@@ -44,11 +80,14 @@ export function runsToday(state, now, cfg = WORKER_DEFAULTS) {
  * state: { runs: [{ taskId, startedAt, endedAt?, outcome? }], attempts: { [taskId]: { count, lastAt } } }
  * running: true when a previous worker run is still alive (lock held).
  */
-export function decideRun({ now, openRows, state, running, paused, cfg = WORKER_DEFAULTS }) {
+export function decideRun({ now, openRows, state, running, paused, boardRows = null, cfg = WORKER_DEFAULTS }) {
   if (paused) return { action: 'SKIP', reason: 'PAUSED' };
   if (!inWakeWindow(now, cfg)) return { action: 'SKIP', reason: 'OUT_OF_WINDOW' };
   if (running) return { action: 'SKIP', reason: 'RUN_IN_PROGRESS' };
-  const tasks = harnessTasks(openRows, cfg);
+  const all = harnessTasks(openRows, cfg);
+  const skipped = boardRows ? all.map((t) => [t.id, boardSkip(t, boardRows, now)]).filter(([, r]) => r) : [];
+  const tasks = all.filter((t) => !skipped.some(([id]) => id === t.id));
+  if (all.length && !tasks.length) return { action: 'SKIP', reason: 'ALL_WAITING_ON_OTHERS', waiting: Object.fromEntries(skipped) };
   if (runsToday(state, now, cfg) >= cfg.maxRunsPerDay) return { action: 'SKIP', reason: tasks.length ? 'DAILY_CAP' : 'NO_HARNESS_TASKS' };
   const last = (state.runs || []).reduce((m, r) => Math.max(m, Date.parse(r.startedAt) || 0), 0);
   if (last && now - last < cfg.minGapMinutes * MIN) return { action: 'SKIP', reason: tasks.length ? 'MIN_GAP' : 'NO_HARNESS_TASKS' };

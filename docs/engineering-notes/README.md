@@ -7,7 +7,7 @@ This repo is **public**. Notes here cover the Muse ↔ Claude operation itself (
 Notes for private projects (PeptideFacts, MM/PAYMTS sites, any client work) go in **that project's own private repo**,
 never here. No credentials, keys, personal data or customer data in any note.
 
-Before starting a task: read `docs/known-issues.md`, the runbooks, and the notes for the same component.
+Before starting a task: read `docs/lessons.md`, `docs/known-issues.md`, the runbooks, and the notes for the same component.
 
 | Task | Date | Summary |
 |---|---|---|
