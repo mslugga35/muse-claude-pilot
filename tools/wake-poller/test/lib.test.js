@@ -44,9 +44,16 @@ test('DST: window follows Eastern wall clock across spring-forward and fall-back
   assert.equal(inWakeWindow(at('2026-10-31T12:05:00Z')), true);
 });
 
-test('pilot end: Nov 27 ET still allowed, Nov 28 ET ended (including late-evening UTC rollover)', () => {
-  assert.equal(pilotEnded(at('2026-11-28T03:00:00Z')), false); // 22:00 ET on Nov 27
-  assert.equal(pilotEnded(at('2026-11-28T05:00:00Z')), true); // 00:00 ET Nov 28
+test('no end date by default: permanent operation (T-20261125-01)', () => {
+  assert.equal(DEFAULTS.pilotEnd, null);
+  assert.equal(pilotEnded(at('2026-11-28T05:00:00Z')), false);
+  assert.equal(pilotEnded(at('2030-01-01T15:00:00Z')), false);
+});
+
+test('optional end date still works, with the late-evening UTC rollover', () => {
+  const cfg = { ...DEFAULTS, pilotEnd: '2026-11-27' };
+  assert.equal(pilotEnded(at('2026-11-28T03:00:00Z'), cfg), false); // 22:00 ET on Nov 27
+  assert.equal(pilotEnded(at('2026-11-28T05:00:00Z'), cfg), true); // 00:00 ET Nov 28
 });
 
 // ---------- cron + collision deferral ----------
@@ -54,7 +61,8 @@ test('cron matcher reads the hourly routine schedule', () => {
   assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-22T13:05:00Z')), true);
   assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-22T03:05:00Z')), true);
   assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-22T04:05:00Z')), false);
-  assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-28T13:05:00Z')), false);
+  assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-28T13:05:00Z')), true); // no month/day limit any more
+  assert.equal(cronMatches(DEFAULTS.hourlyCron, at('2026-11-28T13:06:00Z')), false);
   assert.equal(cronMatches('*/15 * * * *', at('2026-11-22T13:30:00Z')), true);
 });
 

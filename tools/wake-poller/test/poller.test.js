@@ -190,8 +190,9 @@ test('config.json holding a secret is refused', async () => {
   await assert.rejects(runOnce({ home: h, now: T('2026-11-22T15:22:00Z'), env, fetchImpl: w.fetch }), /must not hold secrets/);
 });
 
-test('after the pilot end date nothing runs', async () => {
+test('a configured end date stops the poller after that day', async () => {
   const h = home(); const w = fakeWorld();
+  fs.writeFileSync(path.join(h, 'config.json'), JSON.stringify({ pilotEnd: '2026-11-27' }));
   assert.equal((await runOnce({ home: h, now: T('2026-11-28T15:00:00Z'), env, fetchImpl: w.fetch })).outcome, 'PILOT_ENDED');
   assert.equal(w.authSeen.size, 0);
 });

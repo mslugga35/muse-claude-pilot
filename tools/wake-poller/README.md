@@ -5,8 +5,9 @@ The hourly routine stays unchanged and acts as the fallback.
 
 Every 5 minutes, Windows Task Scheduler runs one poll:
 
-1. Outside **08:05–22:05 America/New_York** (DST-aware), or after **2026-11-27**: logs the poll and does nothing else,
-   without reading the board.
+1. Outside **08:05–22:05 America/New_York** (DST-aware): logs the poll and does nothing else, without reading the
+   board. There is **no end date** (permanent operation since 2026-11-25, T-20261125-01); an optional `pilotEnd`
+   (`YYYY-MM-DD`, Eastern) in `config.json` stops it after that day.
 2. Reads the last 2 days of the `museclaudepilot` board with a **read-only key that can only see that board**
    (`peek`, so nothing is marked read).
 3. A post is a task candidate only if **Muse posted it** (checked by Crosswalk number) and its body has
@@ -77,11 +78,14 @@ powershell -ExecutionPolicy Bypass -File C:\Users\mslug\muse-claude-pilot\tools\
    - It needs no admin rights.
    - It runs only while you're signed in. DPAPI user secrets can't be decrypted by a stored-password-free background
      logon, and storing your Windows password in the task would be a bigger exposure.
-   - It expires on its own at 2026-11-28 00:00 ET.
+   - It has no end date. A failed run is restarted up to 3 times, 5 minutes apart, and a run missed while PC2 was off
+     or asleep starts as soon as possible (`StartWhenAvailable`). Overlapping runs are impossible (`IgnoreNew` plus the
+     poller's own lock directory).
 
 `install-task.ps1 -Validate` registers a disabled copy under another name, prints what Windows stored, and deletes it.
-It was verified on PC2 on 2026-11-22: interval PT5M, no repeat limit, EndBoundary 2026-11-28T00:00-05:00, Interactive
-logon, Limited run level, IgnoreNew, PT9M time limit.
+It was verified on PC2 on 2026-11-22: interval PT5M, no repeat limit, Interactive logon, Limited run level, IgnoreNew,
+PT9M time limit. On 2026-11-25 the live task was changed in place to no EndBoundary, RestartCount 3, RestartInterval
+PT5M (see docs/engineering-notes/T-20261125-01.md).
 
 ## Pre-install evidence (2026-11-22, no credentials)
 
@@ -102,7 +106,7 @@ Enable-ScheduledTask MusePilot-WakePoller               # resume
 .\uninstall-task.ps1 -RemoveCredentials                 # remove task + app copy + local credential files
 ```
 
-## Teardown (pilot end, 2026-11-27): also in ops/SCORECARD.md
+## Teardown (only when the owner says stop)
 
 1. `.\uninstall-task.ps1 -RemoveCredentials`. Verify with `Get-ScheduledTask MusePilot-WakePoller` (should return no
    task).
@@ -116,7 +120,7 @@ Enable-ScheduledTask MusePilot-WakePoller               # resume
 
 `npm test` covers:
 - the ET window edges, midnight, and both DST switches;
-- the pilot end date;
+- no end date by default, and an optional configured end date;
 - deferral around the hourly run;
 - duplicates, reposts and revisions;
 - one task at a time and the rolling-hour cap;
