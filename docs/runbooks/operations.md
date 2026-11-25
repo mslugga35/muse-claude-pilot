@@ -9,7 +9,7 @@ says stop. Spend is bounded by caps, not by hours.
 | Engineer routine (cloud) `trig_01LMfSREdryexCsAJYhHCrY4` | claude.ai routines; repo `mslugga35/muse-claude-pilot` + Crosswalk only | `5 */3 * * *` UTC (every 3 h, 24/7: fallback + FAILOVER check; real work arrives by wake within ~5 min) | RemoteTrigger `get` → `enabled`, `next_run_at`; `list_runs` |
 | Verifier routine (cloud) `trig_017pEXRVsm22g9jigM5LN3No` | claude.ai routines; read-only | `50 23 * * *` UTC (6:50 PM ET) | daily `[VERIFY <date>]` post for Pilot Harness |
 | Wake poller `MusePilot-WakePoller` | PC2 Task Scheduler, `%LOCALAPPDATA%\muse-wake-poller` | every 5 min, 24/7 (`config.json` can narrow it) | `Get-ScheduledTaskInfo MusePilot-WakePoller`; `poller.log` |
-| PC2 worker `MuseOps-PC2Worker` | PC2 Task Scheduler, `%LOCALAPPDATA%\muse-ops-worker` | every 10 min, 24/7; no daily cap (works while there is work); pauses on a subscription refusal until the reset; never runs with paid extra usage on; one task per run; one idle check/day | `worker.log`, `runs\*.jsonl`, `usage-summary.json` |
+| PC2 worker `MuseOps-PC2Worker` | PC2 Task Scheduler, `%LOCALAPPDATA%\muse-ops-worker` | every 10 min, 24/7; no daily cap; task runs pause at 85% weekly usage (92% last day, 97% last 6 h before the reset) to keep the owner's reserve; pauses on a subscription refusal until the reset; never runs with paid extra usage on; one task per run; one idle check/day | `worker.log`, `runs\*.jsonl`, `usage-summary.json` |
 | Muse (PM/QA) | Muse's own scheduler | about every 9–15 min | board activity |
 
 ## Recovery behaviour
