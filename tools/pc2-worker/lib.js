@@ -17,7 +17,9 @@ export const WORKER_DEFAULTS = Object.freeze({
   minGapMinutes: 20, // between run starts
   retryAfterHours: 6, // a task the worker already attempted is not attempted again for this long
   maxAttemptsPerTask: 3, // then it is left for Muse/owner with the evidence already on the board
-  runTimeoutMinutes: 60, // the claude process is killed after this
+  runTimeoutMinutes: 45, // the claude process is killed after this (was 60: one run held the only lane for an hour)
+  maxRunsPerTaskPerDay: 2, // one busy task can't take the whole daily budget (vc8a2c took 4 of 6 on 2026-11-25)
+  minFreeMemoryMB: 1500, // below this, skip the run (LOW_MEMORY) instead of risking a failed run or slowing other apps
   maxBudgetUsd: 8, // passed to claude --max-budget-usd
 });
 
@@ -99,7 +101,7 @@ export function runsToday(state, now, cfg = WORKER_DEFAULTS) {
  * state: { runs: [{ taskId, startedAt, endedAt?, outcome? }], attempts: { [taskId]: { count, lastAt } } }
  * running: true when a previous worker run is still alive (lock held).
  */
-export function decideRun({ now, openRows, state, running, paused, boardRows = null, cfg = WORKER_DEFAULTS }) {
+export function decideRun({ now, openRows, state, running, paused, boardRows = null, freeMemoryMB = Infinity, cfg = WORKER_DEFAULTS }) {
   if (paused) return { action: 'SKIP', reason: 'PAUSED' };
   if (!inWakeWindow(now, cfg)) return { action: 'SKIP', reason: 'OUT_OF_WINDOW' };
   if (running) return { action: 'SKIP', reason: 'RUN_IN_PROGRESS' };
@@ -122,7 +124,14 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
   // Fairness: never-attempted tasks first, then the one attempted longest ago (a busy old task must not starve a new one,
   // e.g. a DEPLOY task waiting behind a long review thread). Ties keep oldest-created first.
   const lastAt = (t) => (attempts[t.id] ? Date.parse(attempts[t.id].lastAt) : -Infinity);
-  const ordered = [...tasks].sort((x, y) => lastAt(x) - lastAt(y));
+  const today = wallClock(now, cfg.timeZone).date;
+  const runsTodayFor = (id) => (state.runs || []).filter((r) => r.taskId === id && wallClock(new Date(r.startedAt), cfg.timeZone).date === today).length;
+  // Priority lanes: DEPLOY tasks first (finishing approved work), then operation infrastructure (this repo), then the
+  // rest; inside a lane, never-attempted first, then least recently attempted.
+  const lane = (t) => (/\bDEPLOY\b/.test(String(t.title || '')) ? 0 : /REPO:\s*mslugga35\/muse-claude-pilot/.test(String(t.details || '')) ? 1 : 2);
+  const ordered = [...tasks].filter((t) => runsTodayFor(t.id) < cfg.maxRunsPerTaskPerDay)
+    .sort((x, y) => lane(x) - lane(y) || lastAt(x) - lastAt(y));
+  if (!ordered.length) return { action: 'SKIP', reason: 'TASK_DAILY_CAP', open: tasks.length };
   const pick = ordered.find((t) => {
     const a = attempts[t.id];
     if (!a) return true;
@@ -134,6 +143,7 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
     return now - Date.parse(a.lastAt) >= cfg.retryAfterHours * 60 * MIN;
   });
   if (!pick) return { action: 'SKIP', reason: 'ALL_ATTEMPTED_RECENTLY', open: tasks.length };
+  if (freeMemoryMB < cfg.minFreeMemoryMB) return { action: 'SKIP', reason: 'LOW_MEMORY', freeMemoryMB: Math.round(freeMemoryMB) };
   return { action: 'RUN', taskId: pick.id, title: String(pick.title || '').slice(0, 200), open: tasks.length };
 }
 

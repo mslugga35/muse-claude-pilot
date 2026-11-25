@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+// Tests must not depend on how much memory the machine running them has free (PC2 is often low): pin it.
+os.freemem = () => 8 * 1024 ** 3;
 import { WORKER_DEFAULTS as D, harnessTasks, decideRun, recordStart, runsToday, runPrompt } from '../lib.js';
 import { checkOnce } from '../worker.js';
 
@@ -204,7 +206,7 @@ test('new feedback since the last attempt makes a task workable at once; the sam
   const d = decideRun({ now: NOON, openRows: [t], state: s, boardRows: [review] });
   assert.equal(d.taskId, 'a1', 'review at 11:30 is newer than the 10:00 attempt');
   s = recordStart(s, 'a1', NOON);
-  assert.equal(decideRun({ now: new Date(+NOON + 30 * 60000), openRows: [t], state: s, boardRows: [review] }).reason, 'ALL_ATTEMPTED_RECENTLY');
+  assert.equal(decideRun({ now: new Date(+NOON + 30 * 60000), openRows: [t], state: s, boardRows: [review], cfg: { ...D, maxRunsPerTaskPerDay: 9 } }).reason, 'ALL_ATTEMPTED_RECENTLY');
 });
 
 test('an explicit RELEASED post ends a hold by another session', () => {
@@ -220,4 +222,35 @@ test('fairness: a never-attempted task goes before an old task that keeps gettin
   const s = recordStart(empty(), 'a1', T('2026-11-25T16:00:00Z'));
   const review = post('REVIEW T-20261124-99: more notes', 'Muse', 'Today, Wed, Nov 25, 11:40am EST');
   assert.equal(decideRun({ now: NOON, openRows: [old, fresh], state: s, boardRows: [review] }).taskId, 'd9');
+});
+
+test('scheduling: DEPLOY lane first, then this repo, then other projects; one task gets at most 2 runs a day', () => {
+  const pf = task('pf1', { title: 'PeptideFacts preview', created_at: '2026-11-24T08:00:00Z' });
+  const infra = task('in1', { title: 'T-20261125-05 poller tweak', details: 'REPO: mslugga35/muse-claude-pilot', created_at: '2026-11-25T09:00:00Z' });
+  const dep = task('dp1', { title: 'T-20261125-03 DEPLOY: merge PR #10', created_at: '2026-11-25T11:29:00Z' });
+  assert.equal(decideRun({ now: NOON, openRows: [pf, infra, dep], state: empty() }).taskId, 'dp1');
+  assert.equal(decideRun({ now: NOON, openRows: [pf, infra], state: empty() }).taskId, 'in1');
+  let s = recordStart(empty(), 'pf1', T('2026-11-25T13:00:00Z'));
+  s = recordStart(s, 'pf1', T('2026-11-25T14:00:00Z'));
+  const review = post('REVIEW pf1: more', 'Muse', 'Today, Wed, Nov 25, 11:30am EST');
+  assert.equal(decideRun({ now: NOON, openRows: [pf], state: s, boardRows: [review] }).reason, 'TASK_DAILY_CAP');
+  assert.equal(decideRun({ now: T('2026-11-26T14:00:00Z'), openRows: [pf], state: s, boardRows: [review] }).taskId, 'pf1'); // next day
+});
+
+test('low memory: the run is skipped (LOW_MEMORY), nothing else is touched', async () => {
+  assert.equal(decideRun({ now: NOON, openRows: [task('a1')], state: empty(), freeMemoryMB: 900 }).reason, 'LOW_MEMORY');
+  assert.equal(decideRun({ now: NOON, openRows: [task('a1')], state: empty(), freeMemoryMB: 4000 }).action, 'RUN');
+  const h = home(); fs.writeFileSync(path.join(h, 'worker-prompt.md'), 'x'); const sp = fakeSpawn(0);
+  const r = await checkOnce({ home: h, now: NOON, env, spawnImpl: sp.impl, readTasks: async () => [task('a1')], freeMemImpl: () => 800 * 1048576 });
+  assert.equal(r.outcome, 'LOW_MEMORY'); assert.equal(sp.calls.length, 0);
+});
+
+test('after a run, the worker cleans up only the descendant processes of that run', async () => {
+  const h = home(); fs.writeFileSync(path.join(h, 'worker-prompt.md'), 'x'); const sp = fakeSpawn(0);
+  const calls = [];
+  const impl = (cmd, args, opts) => { const c = sp.impl(cmd, args, opts); c.pid = 4242; return c; };
+  await checkOnce({ home: h, now: NOON, env, spawnImpl: impl, readTasks: async () => [task('a1')], freeMemImpl: () => 8e9,
+    cleanupImpl: async (pid, at) => { calls.push([pid, typeof at]); return 2; } });
+  assert.deepEqual(calls, [[4242, 'number']]);
+  assert.match(fs.readFileSync(path.join(h, 'worker.log'), 'utf8'), /"CLEANUP".*"stopped":2/);
 });

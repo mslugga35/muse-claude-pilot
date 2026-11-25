@@ -5,6 +5,7 @@
 // It never posts, merges or deploys itself; the headless run does the work under the user's own permission rules
 // (permission mode "auto": nothing is bypassed, anything that would need a prompt is denied).
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -45,7 +46,7 @@ export async function readOpenTasks({ key, fetchImpl = fetch }) {
   return { open, rows };
 }
 
-export async function checkOnce({ home = workerHome(), now = new Date(), env = process.env, fetchImpl = fetch, spawnImpl = spawn, readTasks = readOpenTasks, dryRun = false } = {}) {
+export async function checkOnce({ home = workerHome(), now = new Date(), env = process.env, fetchImpl = fetch, spawnImpl = spawn, readTasks = readOpenTasks, freeMemImpl = os.freemem, cleanupImpl = cleanupDescendants, dryRun = false } = {}) {
   fs.mkdirSync(path.join(home, 'runs'), { recursive: true });
   const cfg = loadCfg(home);
   const paused = fs.existsSync(path.join(home, 'PAUSE'));
@@ -61,12 +62,15 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
       }
     }
     const state = loadState(home);
-    const d = decideRun({ now, openRows, state, running, paused, boardRows, cfg });
-    if (d.action !== 'RUN') { log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting }); return { outcome: d.reason }; }
+    const d = decideRun({ now, openRows, state, running, paused, boardRows, freeMemoryMB: freeMemImpl() / 1048576, cfg });
+    if (d.action !== 'RUN') { log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting, freeMemoryMB: d.freeMemoryMB }); return { outcome: d.reason }; }
     if (dryRun) { log(home, 'CHECK', { outcome: 'DRY_RUN_WOULD_RUN', taskId: d.taskId }); return { outcome: 'DRY_RUN_WOULD_RUN', taskId: d.taskId }; }
     saveState(home, recordStart(state, d.taskId, now)); // recorded BEFORE starting: a crash never causes a rapid re-run
     log(home, 'RUN_START', { taskId: d.taskId, title: d.title });
     const res = await runClaude({ home, cfg, taskId: d.taskId, spawnImpl });
+    // Stop anything the run left behind (dev servers, previews) so it can't eat memory; only its own descendants.
+    const cleaned = res.pid ? await cleanupImpl(res.pid, res.startedAt) : 0;
+    if (cleaned) log(home, 'CLEANUP', { taskId: d.taskId, stopped: cleaned });
     const s2 = loadState(home);
     const last = s2.runs[s2.runs.length - 1];
     if (last && last.taskId === d.taskId) Object.assign(last, { endedAt: new Date().toISOString(), outcome: res.outcome, exitCode: res.code });
@@ -76,6 +80,25 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
   } finally {
     if (lock) lock(); // acquireLock returns its release function
   }
+}
+
+/**
+ * Windows: stop processes descended from the finished run (matched by parent-pid chain AND created after the run
+ * started, so a reused pid can't match an unrelated program). Returns how many were stopped. Never touches anything
+ * else. Other platforms: no-op.
+ */
+export function cleanupDescendants(rootPid, startedAtMs) {
+  if (process.platform !== 'win32' || !Number.isInteger(rootPid)) return Promise.resolve(0);
+  const script = `$ErrorActionPreference='SilentlyContinue'; $t=[DateTime]::FromFileTimeUtc(${Math.floor(startedAtMs * 10000 + 116444736000000000)});`
+    + "$all=Get-CimInstance Win32_Process | Where-Object { $_.CreationDate.ToUniversalTime() -ge $t };"
+    + `$set=New-Object 'System.Collections.Generic.HashSet[int]'; [void]$set.Add(${rootPid}); $grew=$true;`
+    + 'while ($grew) { $grew=$false; foreach ($p in $all) { if ($set.Contains([int]$p.ParentProcessId) -and $set.Add([int]$p.ProcessId)) { $grew=$true } } }'
+    + `$n=0; foreach ($id in $set) { if ($id -ne ${rootPid}) { Stop-Process -Id $id -Force; $n++ } }; $n`;
+  return new Promise((resolve) => {
+    const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, shell: false });
+    let out = ''; ps.stdout.on('data', (b) => { out += b; });
+    ps.on('exit', () => resolve(Number.parseInt(out.trim(), 10) || 0)); ps.on('error', () => resolve(0));
+  });
 }
 
 export function claudeExe(cfg) {
@@ -100,7 +123,7 @@ function runClaude({ home, cfg, taskId, spawnImpl }) {
     const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } }, cfg.runTimeoutMinutes * 60 * 1000);
     child.on('exit', (code, signal) => {
       clearTimeout(timer); fs.closeSync(out);
-      resolve({ outcome: signal ? 'KILLED_TIMEOUT' : code === 0 ? 'EXITED_OK' : 'EXITED_ERROR', code, seconds: Math.round((Date.now() - started) / 1000) });
+      resolve({ outcome: signal ? 'KILLED_TIMEOUT' : code === 0 ? 'EXITED_OK' : 'EXITED_ERROR', code, seconds: Math.round((Date.now() - started) / 1000), pid: child.pid, startedAt: started });
     });
     child.on('error', () => { clearTimeout(timer); try { fs.closeSync(out); } catch { /* closed */ } resolve({ outcome: 'SPAWN_FAILED', code: null, seconds: 0 }); });
   });
