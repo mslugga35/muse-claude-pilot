@@ -37,6 +37,17 @@ function loadCfg(home) {
   return { ...WORKER_DEFAULTS, ...over };
 }
 
+/** G2: remember tasks blocked by repeated failures (shown in usage-summary.json alerts, logged once as TASK_BLOCKED). New feedback or a success clears them. */
+function trackBlocked(state, blocked, now, home) {
+  const prev = state.blocked || {};
+  const next = {};
+  for (const [id, b] of Object.entries(blocked || {})) {
+    next[id] = prev[id] || { since: now.toISOString(), failures: b.failures };
+    if (!prev[id]) log(home, 'TASK_BLOCKED', { taskId: id, failures: b.failures, reason: 'consecutive failed runs; left for Muse/owner until new feedback' });
+  }
+  return { ...state, blocked: next };
+}
+
 export async function readOpenTasks({ key, fetchImpl = fetch }) {
   const cw = new Crosswalk({ url: POLLER.crosswalkUrl, key, agent: POLLER.pollerAgent, fetchImpl });
   await cw.connect();
@@ -66,8 +77,8 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
     try { writeUsage(home, now, cfg); } catch { /* reporting must never block work */ }
     const d = decideRun({ now, openRows, state, running, paused, boardRows, freeMemoryMB: freeMemImpl() / 1048576, cfg });
     if (d.action !== 'RUN') {
-      log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting, freeMemoryMB: d.freeMemoryMB, until: d.until });
-      if (!running) { try { saveState(home, recordSkip(loadState(home), d.reason, now)); } catch { /* reporting only */ } }
+      log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting, freeMemoryMB: d.freeMemoryMB, until: d.until, blocked: d.blocked });
+      if (!running) { try { saveState(home, trackBlocked(recordSkip(loadState(home), d.reason, now), d.blocked, now, home)); } catch { /* reporting only */ } }
       return { outcome: d.reason, until: d.until };
     }
     if (dryRun) { log(home, 'CHECK', { outcome: 'DRY_RUN_WOULD_RUN', taskId: d.taskId }); return { outcome: 'DRY_RUN_WOULD_RUN', taskId: d.taskId }; }
