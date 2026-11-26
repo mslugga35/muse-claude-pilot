@@ -308,3 +308,51 @@ export function runPrompt(taskId) {
   return `WORKER RUN. Your assigned board task id is ${taskId} on crosswalk museclaudepilot. ` +
     'Follow the worker instructions you were given. Work on this one task only, then end.';
 }
+
+/**
+ * Board watches: a session asks the worker to look out for a post (for example Muse's PASS/FAIL on a release) so no
+ * session has to stay open polling. watches.json = [{ id, match: [terms], since, expires }]. A post counts only if a
+ * task poster wrote it (Muse, checked by Crosswalk number; a display name can be copied), it was posted after "since"
+ * (so an older post that mentions the task, such as the assignment itself, never counts) and its brief contains a term.
+ */
+export function activeWatches(list, now) {
+  if (!Array.isArray(list)) return [];
+  return list.filter((w) => w && /^[\w.-]{1,60}$/.test(w.id || '') && Date.parse(w.expires) > +now
+    && Date.parse(w.since) > 0 && Date.parse(w.since) <= +now
+    && Array.isArray(w.match) && w.match.length > 0 && w.match.length <= 10
+    && w.match.every((t) => typeof t === 'string' && t.length >= 6 && t.length <= 80));
+}
+
+/**
+ * New hits only: each (watch, post) pair is reported once. seen is updated in place as each hit is emitted, so a post
+ * listed twice in one read is still one hit. A post whose time can't be parsed is skipped (fail closed: a false
+ * "verdict" is worse than a later one). Brief is capped; it is data, not instructions.
+ */
+export function watchHits(watches, rows, seen = {}, posterNumbers = POLLER.taskPosterNumbers, now = new Date(), stats = {}) {
+  stats.unparseable = 0;
+  const hits = [];
+  for (const w of watches) {
+    const terms = w.match.map((t) => t.toLowerCase());
+    const since = Math.floor(Date.parse(w.since) / 60000) * 60000;
+    for (const r of rows || []) {
+      if (!r || !/^\w{2,20}$/.test(r.id || '') || !posterNumbers.includes(r.via_number)) continue;
+      const brief = String(r.brief || '');
+      if (!terms.some((t) => brief.toLowerCase().includes(t))) continue;
+      const at = parseWhen(r.when, now);
+      if (!at) { stats.unparseable += 1; continue; } // counted so a board format change is visible in the log
+      if (+at < since) continue;
+      const k = `${w.id}:${r.id}`;
+      if (seen[k]) continue;
+      seen[k] = now.toISOString();
+      hits.push({ watchId: w.id, postId: r.id, brief: brief.slice(0, 300), postedAt: at.toISOString() });
+    }
+  }
+  return hits;
+}
+
+/** Board read window for watches, in days: back to the oldest "since", at least 1, at most 3 (a longer read risks the
+ * 5-page truncation on a busy board, which would fail every check). */
+export function watchWindowDays(watches, now) {
+  const oldest = Math.min(...watches.map((w) => Date.parse(w.since)));
+  return Math.min(3, Math.max(1, Math.ceil((+now - oldest) / 86400000)));
+}
