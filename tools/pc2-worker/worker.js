@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Crosswalk, acquireLock } from '../wake-poller/poller.js';
 import { DEFAULTS as POLLER } from '../wake-poller/lib.js';
+import { activeWatches, watchHits, watchWindowDays } from './lib.js';
 import { WORKER_DEFAULTS, decideRun, recordStart, recordSkip, readingFromStream, runPrompt, usageSummary } from './lib.js';
 import { wallClock } from '../wake-poller/lib.js';
 
@@ -58,7 +59,45 @@ export async function readOpenTasks({ key, fetchImpl = fetch }) {
   return { open, rows };
 }
 
-export async function checkOnce({ home = workerHome(), now = new Date(), env = process.env, fetchImpl = fetch, spawnImpl = spawn, readTasks = readOpenTasks, freeMemImpl = os.freemem, cleanupImpl = cleanupDescendants, dryRun = false } = {}) {
+/**
+ * Board watches (see activeWatches in lib.js). Costs nothing without watches.json. With one: no LLM call, and when no
+ * task read already fetched the posts, one extra read-only session (connect + up to 5 pages), back to the watch's
+ * "since" (max 3 days). Paused or locked checks skip watches too, so a hit is only delayed, never lost while within
+ * that window. Hits go to watch-hits.jsonl (append-only) and state.watchSeen, so a session
+ * that stops and resumes never misses or repeats one. Never posts, never starts a run.
+ */
+export async function checkWatches({ home, now, key, fetchImpl = fetch, rows = null, readRows = null, dryRun = false }) {
+  let list;
+  try { list = JSON.parse(fs.readFileSync(path.join(home, 'watches.json'), 'utf8')); } catch { return { hits: 0 }; }
+  const watches = activeWatches(list, now);
+  if (!watches.length) return { hits: 0 };
+  const days = watchWindowDays(watches, now);
+  // Reuse the task read's posts only when they reach back far enough (that read covers 3 days).
+  let board = rows && rows.length && days <= 3 ? rows : null;
+  if (!board) {
+    board = readRows ? await readRows(days) : await (async () => {
+      const cw = new Crosswalk({ url: POLLER.crosswalkUrl, key, agent: POLLER.pollerAgent, fetchImpl });
+      await cw.connect();
+      return cw.boardRows(POLLER.crosswalk, days);
+    })();
+  }
+  const state = loadState(home);
+  const seen = state.watchSeen || {};
+  const stats = {};
+  const hits = watchHits(watches, board, seen, POLLER.taskPosterNumbers, now, stats);
+  if (stats.unparseable) log(home, 'WATCH', { outcome: 'UNPARSEABLE_TIME', n: stats.unparseable });
+  if (!hits.length) return { hits: 0 };
+  if (dryRun) { log(home, 'WATCH', { outcome: 'DRY_RUN_WOULD_RECORD', hits: hits.map((h) => h.postId) }); return { hits: hits.length, dryRun: true }; }
+  const file = path.join(home, 'watch-hits.jsonl');
+  // Hits are appended BEFORE seen is saved (at-least-once): a crash in between can repeat a line on the next check, but
+  // never loses one. watch-hits.jsonl is append-only; consumers dedupe by postId and track which ones they handled.
+  fs.appendFileSync(file, hits.map((h) => JSON.stringify({ ts: now.toISOString(), ...h })).join('\n') + '\n');
+  saveState(home, { ...loadState(home), watchSeen: seen });
+  log(home, 'WATCH_HIT', { hits: hits.map((h) => ({ watchId: h.watchId, postId: h.postId })) });
+  return { hits: hits.length };
+}
+
+export async function checkOnce({ home = workerHome(), now = new Date(), env = process.env, fetchImpl = fetch, spawnImpl = spawn, readTasks = readOpenTasks, readWatchRows = null, freeMemImpl = os.freemem, cleanupImpl = cleanupDescendants, dryRun = false } = {}) {
   fs.mkdirSync(path.join(home, 'runs'), { recursive: true });
   const cfg = loadCfg(home);
   const paused = fs.existsSync(path.join(home, 'PAUSE'));
@@ -71,6 +110,10 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
       if (!env.CROSSWALK_POLLER_KEY) { log(home, 'CHECK', { outcome: 'CONFIG_ERROR', reason: 'key missing from environment' }); return { outcome: 'CONFIG_ERROR' }; }
       try { const r = await readTasks({ key: env.CROSSWALK_POLLER_KEY, fetchImpl }); if (Array.isArray(r)) openRows = r; else { openRows = r.open; boardRows = r.rows; } } catch (e) {
         log(home, 'CHECK', { outcome: 'BOARD_READ_FAILED', error: String(e.message).slice(0, 120) }); return { outcome: 'BOARD_READ_FAILED' };
+      }
+      // A watch failure is logged and never blocks task work.
+      try { await checkWatches({ home, now, key: env.CROSSWALK_POLLER_KEY, fetchImpl, rows: boardRows, readRows: readWatchRows, dryRun }); } catch (e) {
+        log(home, 'WATCH', { outcome: 'READ_FAILED', error: String(e.message).slice(0, 120) });
       }
     }
     const state = loadState(home);
