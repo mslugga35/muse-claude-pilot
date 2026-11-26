@@ -11,7 +11,9 @@ export const WORKER_DEFAULTS = Object.freeze({
   // Only tasks created from the owner's own account count (Crosswalk marks them by: 'you'; Muse and the owner both post
   // from it). A task added by any other board member is never worked, whatever it is addressed to.
   trustedBy: ['you'],
-  trustedVia: ['muse', 'owner', 'mpmmorales', ''],
+  // Exact agent labels of the owner's own account. Muse posts as 'lilSlug (Muse)' and the PC1 session as 'Claude' since
+  // 2026-11-25; without them 7 of 9 harness tasks were silently dropped for a day (L-017).
+  trustedVia: ['muse', 'lilslug (muse)', 'claude', 'owner', 'mpmmorales', ''],
   // Work whenever there is work (owner 2026-11-25, T-20261125-05: "dont worry about the limit and work if i hit the
   // limit i hit the limit"). No fixed daily cap. When the subscription refuses calls, the worker pauses until the reset
   // time Claude Code reports, then resumes on its own. It never runs while paid extra usage is on (OVERAGE_GUARD).
@@ -56,6 +58,14 @@ export function circuitState(state, now, cfg = WORKER_DEFAULTS) {
 }
 
 /** Open tasks addressed to the harness, oldest first. */
+/** Open tasks addressed to the harness that the trust filter refuses, so a refusal is logged, never silent (L-017). */
+export function refusedTasks(openRows, cfg = WORKER_DEFAULTS) {
+  const kept = new Set(harnessTasks(openRows, cfg).map((t) => t.id));
+  return (openRows || [])
+    .filter((t) => t && t.status === 'open' && cfg.harnessNames.includes(String(t.for || '').trim().toLowerCase()) && !kept.has(t.id))
+    .map((t) => ({ id: String(t.id).slice(0, 20), by: String(t.by || '').slice(0, 40), via: String(t.via || '').slice(0, 40) }));
+}
+
 export function harnessTasks(openRows, cfg = WORKER_DEFAULTS) {
   return (openRows || [])
     .filter((t) => t && t.status === 'open' && typeof t.id === 'string' && /^\w{2,20}$/.test(t.id))
