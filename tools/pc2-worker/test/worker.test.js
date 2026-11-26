@@ -6,7 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 // Tests must not depend on how much memory the machine running them has free (PC2 is often low): pin it.
 os.freemem = () => 8 * 1024 ** 3;
-import { WORKER_DEFAULTS as D, harnessTasks, decideRun, recordStart, runsToday, runPrompt, readingFromStream, usageGate, recordSkip, inactivitySummary } from '../lib.js';
+import { WORKER_DEFAULTS as D, harnessTasks, decideRun, recordStart, runsToday, runPrompt, readingFromStream, usageGate, recordSkip, inactivitySummary, consecutiveFailures, circuitState, dropDuplicateTitles, usageSummary } from '../lib.js';
 import { checkOnce } from '../worker.js';
 
 const T = (s) => new Date(s);
@@ -343,4 +343,112 @@ test('checkOnce: streams output, stores the live usage reading, next check pause
   assert.equal(st2.periods.at(-1).reason, 'LIMIT_PAUSE');
   const u = JSON.parse(fs.readFileSync(path.join(h, 'usage-summary.json'), 'utf8'));
   assert.ok(u.today.latestUsageReading && u.today.inactivity);
+});
+
+// ---- T-20261125-06 safeguards. Each test also runs the same scenario with the safeguard switched off (falsifier). ----
+const failed = (taskId, at, outcome = 'EXITED_ERROR') => ({ taskId, startedAt: at.toISOString(), endedAt: new Date(+at + 60000).toISOString(), outcome });
+const withRuns = (runs, attempts = {}) => ({ runs, attempts });
+const H = 3600000;
+
+test('G1 hard per-task daily ceiling: a task never gets more than 6 runs a day, even with fresh feedback; next Eastern day resets', () => {
+  const runs = []; const attempts = { a1: { count: 6, lastAt: new Date(+NOON - 7 * H).toISOString() } };
+  for (let i = 0; i < 6; i += 1) runs.push({ taskId: 'a1', startedAt: new Date(+T('2026-11-25T13:10:00Z') + i * 40 * 60000).toISOString(), outcome: 'EXITED_OK' });
+  const now = T('2026-11-25T22:00:00Z');
+  const fb = [{ author: 'you', via: 'Muse', via_number: '1111-0507-5348-4228', brief: '[MUSE] REVISION a1', when: 'Today, Wed, Nov 25, 4:00pm EST' }];
+  const d = decideRun({ now, openRows: [task('a1')], boardRows: fb, state: withRuns(runs, attempts) });
+  assert.equal(d.reason, 'TASK_DAILY_CEILING');
+  assert.equal(decideRun({ now, openRows: [task('a1')], boardRows: fb, state: withRuns(runs, attempts), cfg: { ...D, hardMaxRunsPerTaskPerDay: Infinity } }).action, 'RUN', 'falsifier: without the ceiling fresh feedback keeps it running');
+  assert.equal(decideRun({ now: T('2026-11-26T14:00:00Z'), openRows: [task('a1')], state: withRuns(runs, { a1: { count: 1, lastAt: '2026-11-25T10:00:00Z' } }) }).action, 'RUN', 'new Eastern day');
+});
+
+test('G2 a task whose last 3 runs failed is blocked until new feedback; a success in between resets the streak', () => {
+  const runs = [0, 1, 2].map((i) => failed('a1', new Date(+NOON - (30 - i * 8) * H)));
+  const attempts = { a1: { count: 3, lastAt: runs[2].startedAt } };
+  const s = withRuns(runs, attempts);
+  const now = new Date(+NOON + 100 * H); // long after any delay
+  assert.equal(consecutiveFailures(s, 'a1', now), 3);
+  const d = decideRun({ now, openRows: [task('a1')], state: { ...s, attempts: { a1: { count: 1, lastAt: runs[2].startedAt } } } });
+  assert.equal(d.action, 'SKIP'); assert.deepEqual(Object.keys(d.blocked), ['a1']);
+  const off = decideRun({ now, openRows: [task('a1')], state: { ...s, attempts: { a1: { count: 1, lastAt: runs[2].startedAt } } }, cfg: { ...D, maxConsecutiveFailures: Infinity } });
+  assert.equal(off.action, 'RUN', 'falsifier: without the safeguard the failing task is retried');
+  const ok = withRuns([runs[0], { ...runs[1], outcome: 'EXITED_OK' }, runs[2]]);
+  assert.equal(consecutiveFailures(ok, 'a1', now), 1, 'streak counts only failures since the last non-failure');
+  // new feedback unblocks (progress, not a retry)
+  const board = [{ author: 'you', via: 'Muse', via_number: '1111-0507-5348-4228', brief: '[MUSE] REVISION for t a1 (a1)', when: 'Today, Wed, Nov 25, 5:00pm EST' }];
+  const withFb = decideRun({ now: T('2026-11-25T23:00:00Z'), openRows: [task('a1')], boardRows: board, state: { runs, attempts: { a1: { count: 3, lastAt: '2026-11-25T12:00:00Z' } } } });
+  assert.equal(withFb.taskId, 'a1');
+});
+
+test('G3 exponential backoff: retry after 6 h, then 12 h after two failures in a row', () => {
+  const t0 = T('2026-11-25T08:00:00Z');
+  const one = withRuns([failed('a1', t0)], { a1: { count: 1, lastAt: t0.toISOString() } });
+  assert.equal(decideRun({ now: new Date(+t0 + 5 * H), openRows: [task('a1')], state: one }).reason, 'ALL_ATTEMPTED_RECENTLY');
+  assert.equal(decideRun({ now: new Date(+t0 + 6.1 * H), openRows: [task('a1')], state: one }).action, 'RUN');
+  const t1 = new Date(+t0 + 7 * H);
+  const two = withRuns([failed('a1', t0), failed('a1', t1)], { a1: { count: 2, lastAt: t1.toISOString() } });
+  assert.equal(decideRun({ now: new Date(+t1 + 7 * H), openRows: [task('a1')], state: two }).reason, 'ALL_ATTEMPTED_RECENTLY', '2 failures: 6 h is no longer enough');
+  assert.equal(decideRun({ now: new Date(+t1 + 12.1 * H), openRows: [task('a1')], state: two }).action, 'RUN');
+});
+
+test('G4 circuit breaker: 5 failed runs in a row across tasks pause the worker 3 h, then one probe run; a success closes it', () => {
+  const base = T('2026-11-25T08:00:00Z');
+  const runs = [0, 1, 2, 3, 4].map((i) => failed(`t${i}`, new Date(+base + i * 15 * 60000)));
+  const s = withRuns(runs);
+  const now = new Date(+base + 2 * H);
+  assert.equal(circuitState(s, now).open, true);
+  const d = decideRun({ now, openRows: [task('z9')], state: s });
+  assert.equal(d.reason, 'CIRCUIT_OPEN'); assert.ok(d.until);
+  assert.equal(decideRun({ now, openRows: [task('z9')], state: s, cfg: { ...D, circuitFailures: 0 } }).action, 'RUN', 'falsifier: no breaker, keeps burning runs');
+  const later = new Date(+base + 5 * H);
+  assert.equal(decideRun({ now: later, openRows: [task('z9')], state: s }).action, 'RUN', 'cooldown over: one probe');
+  const reopened = withRuns([...runs, failed('z9', later)]);
+  assert.equal(circuitState(reopened, new Date(+later + H)).open, true, 'failed probe re-opens it');
+  const closed = withRuns([...runs, { ...failed('z9', later), outcome: 'EXITED_OK' }]);
+  assert.equal(circuitState(closed, new Date(+later + H)).open, false, 'a success closes it');
+  assert.equal(circuitState(withRuns(runs.slice(0, 4)), now).open, false, 'only 4 failures: closed');
+  assert.equal(circuitState(withRuns([...runs.slice(0, 4), { taskId: 'IDLE', startedAt: base.toISOString(), outcome: 'EXITED_ERROR' }]), now).open, false, 'idle checks do not count');
+});
+
+test('G4 a run that crashed the worker (no outcome) counts as failed only after the run timeout', () => {
+  const t0 = T('2026-11-25T08:00:00Z');
+  const s = withRuns([{ taskId: 'a1', startedAt: t0.toISOString() }]);
+  assert.equal(consecutiveFailures(s, 'a1', new Date(+t0 + 30 * 60000)), 0, 'still running');
+  assert.equal(consecutiveFailures(s, 'a1', new Date(+t0 + 60 * 60000)), 1, 'gone past timeout + margin');
+});
+
+test('G5 duplicate open tasks with the same title: only the oldest is worked; TASK_IDs are not compared', () => {
+  const a = task('a1', { title: 'Do X  now', created_at: '2026-11-24T10:00:00Z' });
+  const b = task('b2', { title: 'do x now', created_at: '2026-11-25T10:00:00Z' });
+  const c = task('c3', { title: 'T-20261125-06 other', details: 'T-20261125-06', created_at: '2026-11-25T11:00:00Z' });
+  const d = task('d4', { title: 'T-20261125-06 another', details: 'T-20261125-06', created_at: '2026-11-25T12:00:00Z' });
+  assert.deepEqual(dropDuplicateTitles(harnessTasks([a, b, c, d])).map((t) => t.id), ['a1', 'c3', 'd4']);
+  const st = { runs: [{ taskId: 'a1', startedAt: new Date(+NOON - 3 * H).toISOString() }], attempts: { a1: { count: 1, lastAt: new Date(+NOON - 3 * H).toISOString() } } };
+  assert.equal(decideRun({ now: NOON, openRows: [a, b], state: st }).reason, 'ALL_ATTEMPTED_RECENTLY', 'b2 is a duplicate of a1: not started');
+  assert.equal(decideRun({ now: NOON, openRows: [a, task('b2', { title: 'something else' })], state: st }).taskId, 'b2', 'falsifier: different title runs');
+});
+
+test('G6 owner-visible alerts: fuse hit, breaker opened, daily ceiling hit and blocked tasks appear in the usage summary', () => {
+  let st = withRuns([]);
+  for (const r of ['FUSE', 'CIRCUIT_OPEN', 'TASK_DAILY_CEILING']) st = recordSkip(st, r, NOON);
+  st.blocked = { a1: { since: NOON.toISOString(), failures: 3 } };
+  const u = usageSummary(st, '2026-11-25');
+  assert.deepEqual(u.alerts, { fuseHit: true, circuitOpened: true, taskDailyCeilingHit: true, blockedTasks: [{ id: 'a1', since: NOON.toISOString(), failures: 3 }] });
+  assert.deepEqual(usageSummary(withRuns([]), '2026-11-25').alerts, { fuseHit: false, circuitOpened: false, taskDailyCeilingHit: false, blockedTasks: [] });
+});
+
+test('checkOnce: a blocked task is logged once as TASK_BLOCKED and listed in usage-summary.json; repeated failures stop retries', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'w-'));
+  fs.writeFileSync(path.join(home, 'worker-prompt.md'), 'x');
+  const runs = [0, 1, 2].map((i) => failed('a1', new Date(+NOON - (30 - i * 8) * H)));
+  fs.writeFileSync(path.join(home, 'state.json'), JSON.stringify({ runs, attempts: { a1: { count: 1, lastAt: runs[2].startedAt } } }));
+  const readTasks = async () => ({ open: [task('a1')], rows: [] });
+  const now = new Date(+NOON + 100 * H);
+  for (let i = 0; i < 2; i += 1) {
+    const r = await checkOnce({ home, now, env: { CROSSWALK_POLLER_KEY: 'k' }, readTasks, spawnImpl: () => { throw new Error('must not spawn'); } });
+    assert.equal(r.outcome, 'ALL_ATTEMPTED_RECENTLY');
+  }
+  const log = fs.readFileSync(path.join(home, 'worker.log'), 'utf8');
+  assert.equal(log.split('\n').filter((l) => l.includes('TASK_BLOCKED')).length, 1);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'state.json'), 'utf8')).blocked.a1.failures, 3);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'usage-summary.json'), 'utf8')).today.alerts.blockedTasks.length, 1);
 });

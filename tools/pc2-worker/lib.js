@@ -24,9 +24,36 @@ export const WORKER_DEFAULTS = Object.freeze({
   maxRunsPerTaskPerDay: 2, // fairness: past this, a task yields to any other ready task (it is not a stop: alone, it runs)
   minFreeMemoryMB: 1500, // below this, skip the run (LOW_MEMORY) instead of risking a failed run or slowing other apps
   maxBudgetUsd: 8, // passed to claude --max-budget-usd
+  // T-20261125-06 safeguards (owner: usage, repeated failures, duplicates). None of these is a work target.
+  hardMaxRunsPerTaskPerDay: 6, // G1: one task never takes more than this many runs a day, even with fresh feedback
+  maxConsecutiveFailures: 3, // G2: a task whose last N runs all failed is BLOCKED (left alone) until new feedback arrives
+  circuitFailures: 5, // G4: this many failed runs in a row across tasks open the breaker
+  circuitCooldownMinutes: 180, // G4: breaker pause, then ONE probe run; a success closes it, a failure re-opens it
 });
 
 const MIN = 60 * 1000;
+
+// A run that crashed the worker leaves no outcome; after the run timeout (+10 min lock margin) it counts as failed.
+const FAILED = new Set(['EXITED_ERROR', 'KILLED_TIMEOUT', 'SPAWN_FAILED', 'NO_PROMPT_FILE']);
+const runFailed = (r, now, cfg) => (r.outcome ? FAILED.has(r.outcome) : now - Date.parse(r.startedAt) > (cfg.runTimeoutMinutes + 10) * MIN);
+const runEnd = (r) => Date.parse(r.endedAt || r.startedAt) || 0;
+
+/** Failed runs in a row for one task (newest first), stopping at the first run that did not fail. */
+export function consecutiveFailures(state, taskId, now = new Date(), cfg = WORKER_DEFAULTS) {
+  let n = 0;
+  const runs = (state.runs || []).filter((r) => r.taskId === taskId);
+  for (let i = runs.length - 1; i >= 0 && runFailed(runs[i], now, cfg); i -= 1) n += 1;
+  return n;
+}
+
+/** Circuit breaker: { open, until } when the last circuitFailures runs (any task) all failed and the cooldown has not passed. */
+export function circuitState(state, now, cfg = WORKER_DEFAULTS) {
+  const runs = (state.runs || []).filter((r) => r.taskId !== 'IDLE');
+  const tail = runs.slice(-cfg.circuitFailures);
+  if (!(cfg.circuitFailures > 0) || tail.length < cfg.circuitFailures || !tail.every((r) => runFailed(r, now, cfg))) return { open: false };
+  const until = runEnd(tail[tail.length - 1]) + cfg.circuitCooldownMinutes * MIN;
+  return now < until ? { open: true, until: new Date(until).toISOString() } : { open: false };
+}
 
 /** Open tasks addressed to the harness, oldest first. */
 export function harnessTasks(openRows, cfg = WORKER_DEFAULTS) {
@@ -36,6 +63,12 @@ export function harnessTasks(openRows, cfg = WORKER_DEFAULTS) {
     .filter((t) => cfg.trustedBy.includes(String(t.by || '').trim().toLowerCase()))
     .filter((t) => cfg.trustedVia.includes(String(t.via || '').trim().toLowerCase()))
     .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+}
+
+/** G5: of several open tasks with the same title, only the oldest is worked (list is oldest first). TASK_IDs are NOT compared: they can repeat across distinct tasks. */
+export function dropDuplicateTitles(tasks) {
+  const seen = new Set();
+  return tasks.filter((t) => { const k = String(t.title || '').trim().toLowerCase().replace(/\s+/g, ' '); if (!k) return true; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
 /** Task id plus any TASK_ID (T-YYYYMMDD-NN) in its title or details: the strings posts use to refer to it. */
@@ -105,6 +138,17 @@ export function usageSummary(state, date, cfg = WORKER_DEFAULTS) {
     byTask, outcomes: runs.reduce((a, r) => { a[r.outcome || 'RUNNING'] = (a[r.outcome || 'RUNNING'] || 0) + 1; return a; }, {}),
     note: 'list-price equivalent as reported by Claude Code; billed against the owner subscription, not dollars',
     inactivity: inactivitySummary(state, date, cfg), latestUsageReading: state.limits || null,
+    alerts: alertsFor(state, date, cfg),
+  };
+}
+
+/** Owner-visible safeguard hits for one Eastern date (the worker has a read-only key, so the daily usage post quotes these). */
+export function alertsFor(state, date, cfg = WORKER_DEFAULTS) {
+  const reasons = (state.periods || []).filter((p) => wallClock(new Date(p.from), cfg.timeZone).date === date).map((p) => p.reason);
+  const hit = (r) => reasons.includes(r);
+  return {
+    fuseHit: hit('FUSE'), circuitOpened: hit('CIRCUIT_OPEN'), taskDailyCeilingHit: hit('TASK_DAILY_CEILING'),
+    blockedTasks: Object.entries(state.blocked || {}).map(([id, b]) => ({ id, since: b.since, failures: b.failures })),
   };
 }
 
@@ -190,7 +234,9 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
   if (paused) return { action: 'SKIP', reason: 'PAUSED' };
   if (!inWakeWindow(now, cfg)) return { action: 'SKIP', reason: 'OUT_OF_WINDOW' };
   if (running) return { action: 'SKIP', reason: 'RUN_IN_PROGRESS' };
-  const all = harnessTasks(openRows, cfg);
+  const circuit = circuitState(state, now, cfg);
+  if (circuit.open) return { action: 'SKIP', reason: 'CIRCUIT_OPEN', until: circuit.until };
+  const all = dropDuplicateTitles(harnessTasks(openRows, cfg));
   const skipped = boardRows ? all.map((t) => [t.id, boardSkip(t, boardRows, now)]).filter(([, r]) => r) : [];
   const tasks = all.filter((t) => !skipped.some(([id]) => id === t.id));
   if (all.length && !tasks.length) return { action: 'SKIP', reason: 'ALL_WAITING_ON_OTHERS', waiting: Object.fromEntries(skipped) };
@@ -206,6 +252,7 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
     return { action: 'SKIP', reason: 'NO_HARNESS_TASKS' };
   }
   const attempts = state.attempts || {};
+  const blocked = {};
   // Fairness: never-attempted tasks first, then the one attempted longest ago (a busy old task must not starve a new one,
   // e.g. a DEPLOY task waiting behind a long review thread). Ties keep oldest-created first.
   const lastAt = (t) => (attempts[t.id] ? Date.parse(attempts[t.id].lastAt) : -Infinity);
@@ -219,16 +266,23 @@ export function decideRun({ now, openRows, state, running, paused, boardRows = n
   const over = (t) => (runsTodayFor(t.id) >= cfg.maxRunsPerTaskPerDay ? 1 : 0);
   const ordered = [...tasks].sort((x, y) => over(x) - over(y) || lane(x) - lane(y) || lastAt(x) - lastAt(y));
   const pick = ordered.find((t) => {
+    if (runsTodayFor(t.id) >= cfg.hardMaxRunsPerTaskPerDay) return false; // G1
     const a = attempts[t.id];
     if (!a) return true;
     // New feedback (a review, revision or answer) since the last attempt makes the task workable now: that is progress,
     // not a retry, so it neither waits for retryAfterHours nor counts toward maxAttemptsPerTask.
     const fb = boardRows ? lastFeedbackAt(t, boardRows, now) : null;
     if (fb && fb > Date.parse(a.lastAt)) return true;
+    const fails = consecutiveFailures(state, t.id, now, cfg);
+    if (fails >= cfg.maxConsecutiveFailures) { blocked[t.id] = { failures: fails }; return false; } // G2
     if (a.count >= cfg.maxAttemptsPerTask) return false;
-    return now - Date.parse(a.lastAt) >= cfg.retryAfterHours * 60 * MIN;
+    // G3: exponential backoff after failures (6 h, 12 h, ...); a run that did not fail keeps the plain retry delay
+    return now - Date.parse(a.lastAt) >= cfg.retryAfterHours * 60 * MIN * 2 ** Math.max(0, fails - 1);
   });
-  if (!pick) return { action: 'SKIP', reason: 'ALL_ATTEMPTED_RECENTLY', open: tasks.length };
+  if (!pick) {
+    const ceiling = tasks.length && tasks.every((t) => runsTodayFor(t.id) >= cfg.hardMaxRunsPerTaskPerDay);
+    return { action: 'SKIP', reason: ceiling ? 'TASK_DAILY_CEILING' : 'ALL_ATTEMPTED_RECENTLY', open: tasks.length, blocked: Object.keys(blocked).length ? blocked : undefined };
+  }
   if (freeMemoryMB < cfg.minFreeMemoryMB) return { action: 'SKIP', reason: 'LOW_MEMORY', freeMemoryMB: Math.round(freeMemoryMB) };
   return { action: 'RUN', taskId: pick.id, title: String(pick.title || '').slice(0, 200), open: tasks.length };
 }
