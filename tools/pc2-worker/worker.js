@@ -85,7 +85,7 @@ export async function checkWatches({ home, now, key, fetchImpl = fetch, rows = n
   const seen = state.watchSeen || {};
   const stats = {};
   const hits = watchHits(watches, board, seen, POLLER.taskPosterNumbers, now, stats);
-  if (stats.unparseable) log(home, 'WATCH', { outcome: 'UNPARSEABLE_TIME', n: stats.unparseable });
+  if (stats.unparseable) log(home, 'WATCH', { outcome: 'UNPARSEABLE_TIME', n: stats.unparseable, samples: stats.unparseableSamples });
   if (!hits.length) return { hits: 0 };
   if (dryRun) { log(home, 'WATCH', { outcome: 'DRY_RUN_WOULD_RECORD', hits: hits.map((h) => h.postId) }); return { hits: hits.length, dryRun: true }; }
   const file = path.join(home, 'watch-hits.jsonl');

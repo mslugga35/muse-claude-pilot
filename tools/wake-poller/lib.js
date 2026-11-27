@@ -91,7 +91,8 @@ export function nearbyScheduledRun(now, cfg = DEFAULTS) {
 // ---------- Crosswalk "when" strings, e.g. "Sat, Nov 21, 6:51pm EST" ----------
 const MONTHS = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
 export function parseWhen(when, now) {
-  const m = /^\w{3}, (\w{3}) (\d{1,2}),(?: (\d{4}),)? (\d{1,2}):(\d{2})(am|pm) (EST|EDT)$/.exec(String(when || '').trim());
+  // The board prefixes recent posts with "Today, " or "Yesterday, " (seen 2026-11-27 on post troify).
+  const m = /^(?:(?:Today|Yesterday), )?\w{3}, (\w{3}) (\d{1,2}),(?: (\d{4}),)? (\d{1,2}):(\d{2})(am|pm) (EST|EDT)$/.exec(String(when || '').trim());
   if (!m) return null;
   const [, mon, day, yearStr, hh, mm, ampm, zone] = m;
   let hour = Number(hh) % 12; if (ampm === 'pm') hour += 12;

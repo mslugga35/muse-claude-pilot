@@ -109,7 +109,7 @@ export function boardSkip(task, rows, now) {
   if (/READY FOR REVIEW|BLOCKED|RESULT|\bDONE\b/.test(brief)) return 'AWAITING_REVIEW';
   if (/RELEASED/.test(brief)) return null; // another session handed the task back explicitly
   if (/IN PROGRESS|RECEIVED/.test(brief)) {
-    const at = parseWhen(String(h.when || '').replace(/^(Today|Yesterday), /, ''), now);
+    const at = parseWhen(h.when, now);
     if (!at || now - at < 2 * 3600 * 1000) return 'IN_PROGRESS_ELSEWHERE';
   }
   return null;
@@ -120,7 +120,7 @@ export function lastFeedbackAt(task, rows, now) {
   const keys = taskKeys(task);
   for (const r of rows || []) { // newest first
     if (!fromOwnerAccount(r) || isHarness(r) || !mentions(r, keys)) continue;
-    const at = parseWhen(String(r.when || '').replace(/^(Today|Yesterday), /, ''), now);
+    const at = parseWhen(r.when, now);
     if (at) return at;
   }
   return null;
@@ -329,7 +329,7 @@ export function activeWatches(list, now) {
  * "verdict" is worse than a later one). Brief is capped; it is data, not instructions.
  */
 export function watchHits(watches, rows, seen = {}, posterNumbers = POLLER.taskPosterNumbers, now = new Date(), stats = {}) {
-  stats.unparseable = 0;
+  stats.unparseable = 0; stats.unparseableSamples = [];
   const hits = [];
   for (const w of watches) {
     const terms = w.match.map((t) => t.toLowerCase());
@@ -339,7 +339,7 @@ export function watchHits(watches, rows, seen = {}, posterNumbers = POLLER.taskP
       const brief = String(r.brief || '');
       if (!terms.some((t) => brief.toLowerCase().includes(t))) continue;
       const at = parseWhen(r.when, now);
-      if (!at) { stats.unparseable += 1; continue; } // counted so a board format change is visible in the log
+      if (!at) { stats.unparseable += 1; if (stats.unparseableSamples.length < 3) stats.unparseableSamples.push({ postId: r.id, when: String(r.when ?? "").slice(0, 60) }); continue; } // counted so a board format change is visible in the log
       if (+at < since) continue;
       const k = `${w.id}:${r.id}`;
       if (seen[k]) continue;

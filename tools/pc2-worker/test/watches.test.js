@@ -93,6 +93,7 @@ test('watchHits: posts with an unreadable time are counted, not silently dropped
   const w = { ...W, since: '2026-11-26T10:00:42Z' }; // 5:00:42am EST; the post shows 5:00am
   assert.deepEqual(watchHits([w], rows, {}, undefined, NOW, stats).map((h) => h.postId), ['m1']);
   assert.equal(stats.unparseable, 1);
+  assert.deepEqual(stats.unparseableSamples, [{ postId: 'nt', when: 'yesterday-ish' }]);
 });
 
 test('checkWatches: logs UNPARSEABLE_TIME so a board format change is visible', async () => {
@@ -100,4 +101,11 @@ test('checkWatches: logs UNPARSEABLE_TIME so a board format change is visible', 
   fs.writeFileSync(path.join(home, 'watches.json'), JSON.stringify([W]));
   await checkWatches({ home, now: NOW, readRows: async () => [row('nt', 'PF-20261125-007 PASS', '2026-11-26 11:00 UTC')] });
   assert.match(fs.readFileSync(path.join(home, 'worker.log'), 'utf8'), /"outcome":"UNPARSEABLE_TIME","n":1/);
+});
+
+test('watchHits: a post dated "Today, ..." (how the board shows recent posts) counts', () => {
+  const stats = {};
+  const rows = [row('td', 'PF-20261125-007 VERDICT: FAIL', 'Today, Thu, Nov 26, 9:30am EST')];
+  assert.deepEqual(watchHits([W], rows, {}, undefined, NOW, stats).map((h) => h.postId), ['td']);
+  assert.equal(stats.unparseable, 0);
 });

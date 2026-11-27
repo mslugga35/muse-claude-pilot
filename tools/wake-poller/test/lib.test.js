@@ -224,6 +224,8 @@ test('engineer progress: ACK/PONG/RESULT by work key, ignores non-engineer poste
 test('parseWhen handles EST, EDT, noon/midnight and year rollover', () => {
   const now = at('2026-11-22T20:00:00Z');
   assert.equal(parseWhen('Sat, Nov 21, 6:51pm EST', now).toISOString(), '2026-11-21T23:51:00.000Z');
+  assert.equal(parseWhen('Today, Sat, Nov 21, 6:51pm EST', now).toISOString(), '2026-11-21T23:51:00.000Z');
+  assert.equal(parseWhen('Yesterday, Sat, Nov 21, 6:51pm EST', now).toISOString(), '2026-11-21T23:51:00.000Z');
   assert.equal(parseWhen('Sat, Oct 31, 8:05am EDT', now).toISOString(), '2026-10-31T12:05:00.000Z');
   assert.equal(parseWhen('Sun, Nov 22, 12:00am EST', now).toISOString(), '2026-11-22T05:00:00.000Z');
   assert.equal(parseWhen('Sun, Nov 22, 12:30pm EST', now).toISOString(), '2026-11-22T17:30:00.000Z');
