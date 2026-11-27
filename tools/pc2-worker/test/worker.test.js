@@ -452,3 +452,15 @@ test('checkOnce: a blocked task is logged once as TASK_BLOCKED and listed in usa
   assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'state.json'), 'utf8')).blocked.a1.failures, 3);
   assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'usage-summary.json'), 'utf8')).today.alerts.blockedTasks.length, 1);
 });
+
+test('trust: tasks from the owner account labelled lilSlug (Muse) or Claude are worked; others are refused and logged (L-017)', async () => {
+  const { refusedTasks } = await import('../lib.js');
+  const rows = [task('m1', { via: 'lilSlug (Muse)' }), task('c1', { via: 'Claude' }), task('g1', { via: 'Grok Bot' }), task('s1', { by: 'stranger' }), task('x1', { for: 'Muse', via: 'Grok Bot' })];
+  assert.deepEqual(harnessTasks(rows).map((t) => t.id).sort(), ['c1', 'm1']);
+  assert.deepEqual(refusedTasks(rows).map((t) => t.id), ['g1', 's1'], 'only harness-addressed refusals are listed');
+  const h = home(); fs.writeFileSync(path.join(h, 'worker-prompt.md'), 'x');
+  const st = { runs: [{ taskId: 'zz', startedAt: new Date(+NOON - 60000).toISOString() }], attempts: {} };
+  fs.writeFileSync(path.join(h, 'state.json'), JSON.stringify(st));
+  await checkOnce({ home: h, now: NOON, env, spawnImpl: fakeSpawn(0).impl, readTasks: async () => [task('g1', { via: 'Grok Bot' })] });
+  assert.match(fs.readFileSync(path.join(h, 'worker.log'), 'utf8'), /"refused":\[\{"id":"g1","by":"you","via":"Grok Bot"\}\]/);
+});

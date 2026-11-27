@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Crosswalk, acquireLock } from '../wake-poller/poller.js';
 import { DEFAULTS as POLLER } from '../wake-poller/lib.js';
-import { WORKER_DEFAULTS, decideRun, recordStart, recordSkip, readingFromStream, runPrompt, usageSummary } from './lib.js';
+import { WORKER_DEFAULTS, decideRun, recordStart, recordSkip, readingFromStream, runPrompt, usageSummary, refusedTasks } from './lib.js';
 import { wallClock } from '../wake-poller/lib.js';
 
 export function workerHome() { return path.join(process.env.LOCALAPPDATA || '.', 'muse-ops-worker'); }
@@ -77,7 +77,8 @@ export async function checkOnce({ home = workerHome(), now = new Date(), env = p
     try { writeUsage(home, now, cfg); } catch { /* reporting must never block work */ }
     const d = decideRun({ now, openRows, state, running, paused, boardRows, freeMemoryMB: freeMemImpl() / 1048576, cfg });
     if (d.action !== 'RUN') {
-      log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting, freeMemoryMB: d.freeMemoryMB, until: d.until, blocked: d.blocked });
+      const refused = refusedTasks(openRows, cfg);
+      log(home, 'CHECK', { outcome: d.reason, open: d.open, waiting: d.waiting, freeMemoryMB: d.freeMemoryMB, until: d.until, blocked: d.blocked, refused: refused.length ? refused : undefined });
       if (!running) { try { saveState(home, trackBlocked(recordSkip(loadState(home), d.reason, now), d.blocked, now, home)); } catch { /* reporting only */ } }
       return { outcome: d.reason, until: d.until };
     }
